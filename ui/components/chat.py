@@ -1,0 +1,182 @@
+"""
+ui/components/chat.py
+
+All rendering for the chat view — controls bar, message bubbles,
+typing indicator, empty state, and the input bar.
+
+Imported by:
+  - ui/app.py
+"""
+
+import streamlit as st
+
+from ui.state import add_message, clear_error, go_to_list
+from ui.api_client import send_chat_message, delete_conversation
+
+
+# ── Chat controls ─────────────────────────────────────────────────────────────
+
+def render_chat_controls() -> None:
+    """
+    Render the top control bar for the chat view.
+
+    Layout:
+      Left  — Back button: returns to list view without deleting anything
+      Right — Delete Chat button, or inline confirmation when triggered
+
+    Delete confirmation flow:
+      1. User clicks Delete Chat → confirm_delete = True → reruns
+      2. Confirmation renders inline: "Are you sure?" + Yes / Cancel
+      3. Yes Delete → delete_conversation() → go_to_list() on success
+                   → error banner + stay in chat on failure
+      4. Cancel → confirm_delete = False → reruns → button reappears
+    """
+    col_back, col_spacer, col_action = st.columns([2, 4, 3])
+
+    with col_back:
+        if st.button("← Back", key="back_btn"):
+            go_to_list()
+            st.rerun()
+
+    with col_action:
+        if not st.session_state.confirm_delete:
+            if st.button("🗑 Delete Chat", key="delete_btn"):
+                st.session_state.confirm_delete = True
+                st.rerun()
+        else:
+            st.markdown(
+                '<div class="cs-confirm">Are you sure? This cannot be undone.</div>',
+                unsafe_allow_html=True,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Yes, Delete", key="confirm_yes_btn"):
+                    success = delete_conversation(st.session_state.session_id)
+                    if success:
+                        go_to_list()
+                    st.rerun()
+            with c2:
+                if st.button("Cancel", key="confirm_cancel_btn"):
+                    st.session_state.confirm_delete = False
+                    st.rerun()
+
+    st.markdown('<hr class="cs-divider">', unsafe_allow_html=True)
+
+
+# ── Message renders ───────────────────────────────────────────────────────────
+
+def render_message(role: str, content: str, timestamp: str) -> None:
+    """
+    Render a single chat bubble with correct alignment and styling.
+
+    Args:
+        role      : "user" → right-aligned blue bubble
+                    "assistant" → left-aligned dark bubble
+        content   : message text to display inside the bubble
+        timestamp : HH:MM string shown below the bubble
+    """
+    st.markdown(f"""
+    <div class="cs-msg-row {role}">
+        <div>
+            <div class="cs-bubble {role}">{content}</div>
+            <div class="cs-ts">{timestamp}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_typing_indicator() -> None:
+    """
+    Render an animated three-dot bounce indicator while is_loading is True,
+    showing the user the assistant is processing their message.
+    """
+    st.markdown("""
+    <div class="cs-msg-row assistant">
+        <div class="cs-typing">
+            <div class="cs-dot"></div>
+            <div class="cs-dot"></div>
+            <div class="cs-dot"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_empty_chat_state() -> None:
+    """
+    Render a placeholder prompt when no messages exist yet in a new
+    conversation. Shown only when messages list is empty and not loading.
+    """
+    st.markdown("""
+    <div class="cs-empty">
+        <div class="cs-empty-icon">💬</div>
+        <div class="cs-empty-text">
+            Ask me about your credit card spend,<br>
+            reward points, billing statements, or card benefits.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_conversation() -> None:
+    """
+    Iterate over all messages in st.session_state.messages and render
+    each as a bubble. Appends the typing indicator when is_loading is True.
+    Shows the empty chat state if no messages exist and not loading.
+    """
+    messages = st.session_state.messages
+
+    if not messages and not st.session_state.is_loading:
+        render_empty_chat_state()
+        return
+
+    for msg in messages:
+        render_message(msg["role"], msg["content"], msg["timestamp"])
+
+    if st.session_state.is_loading:
+        render_typing_indicator()
+
+
+# ── Input bar ─────────────────────────────────────────────────────────────────
+
+def render_input_bar() -> None:
+    """
+    Render the message text input and Send button at the bottom of
+    the chat view.
+
+    Two-pass Streamlit pattern:
+      Pass 1 — user clicks Send:
+                adds user message to state, sets is_loading = True, reruns.
+      Pass 2 — is_loading is True:
+                calls send_chat_message(), appends assistant reply,
+                clears is_loading, reruns.
+
+    Splitting into two passes ensures the typing indicator renders
+    before the blocking HTTP request fires — without this the UI
+    appears frozen until the API responds.
+    """
+    with st.container():
+        col_input, col_btn = st.columns([6, 1])
+
+        with col_input:
+            user_input = st.text_input(
+                label="message",
+                label_visibility="collapsed",
+                placeholder="Ask about your spend, rewards, or card benefits…",
+                key="chat_input",
+            )
+
+        with col_btn:
+            send_clicked = st.button("Send", key="send_btn")
+
+    if send_clicked and user_input.strip():
+        clear_error()
+        add_message("user", user_input.strip())
+        st.session_state.is_loading = True
+        st.rerun()
+
+    if st.session_state.is_loading:
+        reply = send_chat_message(st.session_state.messages[-1]["content"])
+        st.session_state.is_loading = False
+        if reply:
+            add_message("assistant", reply)
+        st.rerun()
