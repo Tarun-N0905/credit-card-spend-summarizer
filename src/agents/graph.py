@@ -1,11 +1,11 @@
-"""
-src/agents/graph.py
+# src/agents/graph.py
 
+"""
 LangGraph state machine for the credit card RAG agent.
 
 Workflow:
     router_node
-        ├─→ "knowledge_base" ──→ kb_search_node ──→ rerank_node ──→ response_node ──→ END
+        ├─→ "knowledge_base" ──→ kb_search_node ──→ response_node ──→ END
         └─→ "sql_query" ─────────────────────────→ sql_search_node ──→ response_node ──→ END
 
 The router decides which path based on query classification.
@@ -22,7 +22,6 @@ from src.agents.nodes import (
     router_node,
     kb_search_node,
     sql_search_node,
-    rerank_node,
     response_node,
 )
 
@@ -37,22 +36,20 @@ def _route_decision(state: AgentState) -> Literal["knowledge_base", "sql_query"]
 
 def build_agent_graph():
     """Build and compile the LangGraph state machine."""
-    
+
     # Create the graph
     graph = StateGraph(AgentState)
-    
+
     # Add all nodes
     graph.add_node("router", router_node)
     graph.add_node("kb_search", kb_search_node)
-    graph.add_node("rerank", rerank_node)
     graph.add_node("sql_search", sql_search_node)
     graph.add_node("response", response_node)
-    
+
     # Set entry point
     graph.set_entry_point("router")
-    
+
     # Conditional routing from router
-    # Split into knowledge_base path or sql_query path
     graph.add_conditional_edges(
         "router",
         _route_decision,
@@ -61,19 +58,18 @@ def build_agent_graph():
             "sql_query": "sql_search",
         }
     )
-    
-    # KB path: search → rerank → response → END
-    graph.add_edge("kb_search", "rerank")
-    graph.add_edge("rerank", "response")
+
+    # KB path: search → response → END
+    graph.add_edge("kb_search", "response")
     graph.add_edge("response", END)
-    
+
     # SQL path: search → response → END
     graph.add_edge("sql_search", "response")
-    
+
     # Compile the graph
     compiled_agent = graph.compile()
     logger.info("[build_agent_graph] LangGraph compiled successfully")
-    
+
     return compiled_agent
 
 
@@ -84,10 +80,10 @@ credit_card_agent = build_agent_graph()
 def run_credit_card_agent(query: str) -> dict:
     """
     Execute the credit card agent.
-    
+
     Args:
         query: User's natural language question
-    
+
     Returns:
         Dict with final response (see AgentResponse schema)
     """
@@ -96,19 +92,18 @@ def run_credit_card_agent(query: str) -> dict:
         "route": "",
         "router_reason": "",
         "retrieved_docs": [],
-        "reranked_docs": [],
         "generated_sql": "",
         "sql_result": "",
         "response": {}
     }
-    
+
     try:
         logger.info(f"[run_credit_card_agent] Processing query: {query[:80]}...")
         final_state = credit_card_agent.invoke(initial_state)
         response = final_state.get("response", {})
         logger.info(f"[run_credit_card_agent] Route taken: {response.get('route_taken', 'unknown')}")
         return response
-    
+
     except Exception as exc:
         logger.error(f"[run_credit_card_agent] Error: {exc}")
         return {

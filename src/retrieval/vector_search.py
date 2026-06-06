@@ -7,7 +7,7 @@ from src.retrieval.schemas import RetrievedChunk
 from src.retrieval.reranker import rerank_results
 
 
-VECTOR_TOP_K = 20
+VECTOR_TOP_K = 10
 FINAL_TOP_K = 5
 
 
@@ -18,7 +18,24 @@ def _vector_to_pg(vector: list[float]) -> str:
 def search_semantic(
     query: str,
     top_k: int = FINAL_TOP_K,
+    rerank: bool = True,
 ) -> list[RetrievedChunk]:
+    """
+    Semantic retrieval using pgvector.
+
+    Flow:
+        Query
+          ↓
+        Embed Query
+          ↓
+        Cosine Similarity Search
+          ↓
+        Top 10 Candidates
+          ↓
+        (Optional) Cohere Rerank
+          ↓
+        Final Results
+    """
 
     query_embedding = embed_query(query)
 
@@ -61,8 +78,11 @@ def search_semantic(
         for r in rows
     ]
 
+    if not rerank:
+        return chunks
+
     return rerank_results(
         query=query,
         chunks=chunks,
-        top_k=top_k,
+        top_k=min(top_k, len(chunks)),
     )
