@@ -24,6 +24,7 @@ import psycopg
 from psycopg.rows import dict_row
 from src.core.embeddings import embed_documents
 from src.core.settings import settings
+from langchain_community.utilities import SQLDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -371,3 +372,8 @@ def delete_conversation(session_id: str) -> None:
             (session_id,),
         )
     logger.info("Deleted conversation for session_id=%s", session_id)
+
+def get_sql_database() -> SQLDatabase:
+    return SQLDatabase.from_uri(
+        settings.cc_db_connection_string
+    )

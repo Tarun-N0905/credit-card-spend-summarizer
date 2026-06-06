@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""
     langsmith_project: str = "capstone"
+    # Cohere
+    cohere_api_key: str = ""
+    cohere_rerank_model: str = "rerank-v3.5"
+    cc_db_connection_string: str = ""
 
 
 @lru_cache(maxsize=1)
