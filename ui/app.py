@@ -135,7 +135,8 @@ section.main,
     border-radius: 16px;
     font-size: 0.88rem;
     line-height: 1.6;
-    word-break: break-word;
+    overflow-wrap: break-word;
+    min-width: 60px;
 }
 .cs-bubble.user {
     background: linear-gradient(135deg, #3b5bdb, #4c6ef5);

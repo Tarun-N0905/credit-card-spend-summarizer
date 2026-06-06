@@ -45,16 +45,18 @@ def search_semantic(
         rows = conn.execute(
             """
             SELECT
-                id,
-                chunk_text,
-                content_type,
-                page_number,
-                section_name,
-                metadata,
-                position,
-                1 - (embedding <=> %s::vector) AS score
-            FROM document_chunks
-            ORDER BY embedding <=> %s::vector
+                dc.id,
+                dc.chunk_text,
+                dc.content_type,
+                dc.page_number,
+                dc.section_name,
+                dc.metadata,
+                dc.position,
+                d.document_name,
+                1 - (dc.embedding <=> %s::vector) AS score
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            ORDER BY dc.embedding <=> %s::vector
             LIMIT %s
             """,
             (
@@ -72,6 +74,7 @@ def search_semantic(
             content_type=r["content_type"],
             page_number=r["page_number"],
             section_name=r["section_name"],
+            document_name=r["document_name"],
             metadata=r["metadata"] or {},
             position=r["position"],
         )

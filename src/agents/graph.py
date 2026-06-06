@@ -101,6 +101,8 @@ def run_credit_card_agent(query: str) -> dict:
         logger.info(f"[run_credit_card_agent] Processing query: {query[:80]}...")
         final_state = credit_card_agent.invoke(initial_state)
         response = final_state.get("response", {})
+        if hasattr(response, "model_dump"):
+            response = response.model_dump()
         logger.info(f"[run_credit_card_agent] Route taken: {response.get('route_taken', 'unknown')}")
         return response
 

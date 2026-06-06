@@ -6,7 +6,7 @@ Defines the structure of agent responses returned to the chat endpoint.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional,Union
 
 
 class AgentResponse(BaseModel):
@@ -23,7 +23,7 @@ class AgentResponse(BaseModel):
     """
     query: str = Field(description="The user's original query")
     answer: str = Field(description="The generated response")
-    data_sources: str = Field(description="Source of the answer (e.g., KB document, SQL query)")
+    data_sources: Union[list, str] = Field(description="Source of the answer (e.g., KB document, SQL query)")
     page_no: str = Field(description="Page numbers from documents (or 'N/A' for SQL)")
     document_name: str = Field(description="Name of document/database used")
     sql_query_executed: Optional[str] = Field(

@@ -11,6 +11,6 @@ class RetrievedChunk:
     content_type: str | None
     page_number: int | None
     section_name: str | None
-
+    document_name: str | None
     metadata: dict[str, Any]
     position: dict[str, Any] | None
