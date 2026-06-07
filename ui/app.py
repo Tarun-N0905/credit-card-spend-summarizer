@@ -14,10 +14,10 @@ Run with:
 
 import streamlit as st
 
-from ui.state import init_session_state
-from ui.components.header import render_header, render_error_banner
-from ui.components.list_view import render_list_view
-from ui.components.chat import (
+from state import init_session_state
+from components.header import render_header, render_error_banner
+from components.list_view import render_list_view
+from components.chat import (
     render_chat_controls,
     render_conversation,
     render_input_bar,

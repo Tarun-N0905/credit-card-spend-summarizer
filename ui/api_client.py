@@ -16,7 +16,7 @@ Imported by:
 import streamlit as st
 import requests
 
-from ui.state import clear_error, go_to_list
+from state import clear_error, go_to_list
 
 API_BASE_URL = "http://localhost:8000"
 

@@ -9,7 +9,7 @@ Imported by:
 
 import streamlit as st
 
-from ui.state import clear_error
+from state import clear_error
 
 
 def render_header() -> None:

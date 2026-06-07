@@ -10,8 +10,8 @@ Imported by:
 
 import streamlit as st
 
-from ui.state import add_message, clear_error, go_to_list
-from ui.api_client import send_chat_message, delete_conversation
+from state import add_message, clear_error, go_to_list
+from api_client import send_chat_message, delete_conversation
 
 
 # ── Chat controls ─────────────────────────────────────────────────────────────
