@@ -22,14 +22,7 @@ def _get_db() -> SQLDatabase:
 
 
 def generate_sql(nl_query: str) -> str:
-<<<<<<< HEAD
-    """
-    Convert a natural language query into a SQL string using LLM + NL2SQL prompt.
-    Returns the raw SQL string (no execution).
-    """
-=======
     """Convert a natural language query into a SQL string using LLM + NL2SQL prompt."""
->>>>>>> updation
     db = _get_db()
     schema = db.get_table_info()
     llm = _get_llm()
@@ -46,30 +39,6 @@ def generate_sql(nl_query: str) -> str:
     return sql.strip()
 
 
-<<<<<<< HEAD
-def execute_sql(sql: str) -> str:
-    """
-    Execute a SQL string on the cc_db (read-only business database).
-    Returns query results as a formatted string.
-    """
-    db = _get_db()
-    try:
-        result = db.run(sql)
-        logger.info("sql_service: executed SQL successfully")
-        return result if result else "Query returned no results."
-    except Exception as e:
-        logger.error("sql_service: SQL execution failed: %s", e)
-        return f"SQL execution error: {e}"
-
-
-def query(nl_query: str) -> tuple[str, str]:
-    """
-    Full NL2SQL pipeline: natural language → SQL → execute → return results.
-
-    Returns:
-        (sql_executed, results_string)
-    """
-=======
 def execute_sql(sql: str) -> list[dict]:
     """Execute a SQL string on the cc_db and return a list of dicts (one per row)."""
     db = _get_db()
@@ -94,7 +63,6 @@ def execute_sql(sql: str) -> list[dict]:
 
 def query(nl_query: str) -> tuple[str, list[dict]]:
     """Full NL2SQL pipeline: natural language → SQL → execute → return results."""
->>>>>>> updation
     try:
         sql = generate_sql(nl_query)
         logger.info("sql_service: generated SQL: %s", sql)
@@ -102,8 +70,4 @@ def query(nl_query: str) -> tuple[str, list[dict]]:
         return sql, results
     except Exception as e:
         logger.error("sql_service: query pipeline failed: %s", e)
-<<<<<<< HEAD
-        return "", f"Error processing query: {e}"
-=======
         return "", []
->>>>>>> updation
