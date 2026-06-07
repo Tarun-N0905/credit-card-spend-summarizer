@@ -94,33 +94,10 @@ def _enrich_query(query: str, history: list) -> str:
     return f"[Conversation so far]\n{history_text}\n\n[New question]\n{query}"
 
 
-def _extract_card_and_month(text: str):
-    card_match = re.search(r'\bCC-\d+\b', text, re.IGNORECASE)
-    card_id = card_match.group(0).upper() if card_match else None
-
-    month_match = re.search(r'\b(20\d{2})[-/](0[1-9]|1[0-2])\b', text)
-    if month_match:
-        billing_month = f"{month_match.group(1)}-{month_match.group(2)}"
-    else:
-        names = {
-            'january':'01','february':'02','march':'03','april':'04',
-            'may':'05','june':'06','july':'07','august':'08',
-            'september':'09','october':'10','november':'11','december':'12',
-        }
-        nm = re.search(r'\b(' + '|'.join(names) + r')\s+(20\d{2})\b', text, re.IGNORECASE)
-        billing_month = f"{nm.group(2)}-{names[nm.group(1).lower()]}" if nm else None
-
-    return card_id, billing_month
 
 
-def _is_spend_summary(query: str) -> bool:
-    keywords = [
-        'summar','breakdown','spend','spent','spending','category',
-        'merchant','international','reward point','mom','month-over-month',
-        'compare','fee waiver','on track',
-    ]
-    q = query.lower()
-    return any(k in q for k in keywords)
+
+
 
 
 def _persist_turn(state: AgentState, assistant_reply: str) -> None:
@@ -134,124 +111,6 @@ def _persist_turn(state: AgentState, assistant_reply: str) -> None:
     except Exception as e:
         print(f"[_persist_turn] failed: {e}")
 
-
-# ─────────────────────────────────────────────
-# Spend-summary SQL (7 queries)
-# ─────────────────────────────────────────────
-
-def _run_spend_summary_queries(card_id: str, billing_month: str):
-    year_int  = int(billing_month.split('-')[0])
-    month_int = int(billing_month.split('-')[1])
-    prev_month = (
-        f"{year_int-1}-12" if month_int == 1
-        else f"{year_int}-{month_int-1:02d}"
-    )
-
-    ctx: dict = {"card_id": card_id, "billing_month": billing_month}
-    sql_list  = []
-
-    queries = {
-        "customer_info": (
-            f"SELECT c.full_name, cc.card_variant, cc.reward_points, "
-            f"cc.credit_limit, cc.available_limit, cc.outstanding_amt "
-            f"FROM credit_cards cc "
-            f"JOIN customers c ON cc.customer_id = c.customer_id "
-            f"WHERE cc.card_id = '{card_id}' LIMIT 1"
-        ),
-        "billing_statement": (
-            f"SELECT billing_month, start_date::text, end_date::text, due_date::text, "
-            f"opening_balance, total_purchases, total_payments, total_fees, "
-            f"total_refunds, closing_balance, min_amount_due, reward_pts_earned "
-            f"FROM billing_statements "
-            f"WHERE card_id = '{card_id}' AND billing_month = '{billing_month}' LIMIT 1"
-        ),
-        "category_breakdown": (
-            f"SELECT ct.category_name, COUNT(*) AS txn_count, "
-            f"SUM(ct.amount) AS total_spend, SUM(ct.reward_pts_earned) AS points_earned "
-            f"FROM card_transactions ct "
-            f"JOIN billing_statements bs ON bs.card_id = ct.card_id "
-            f"  AND bs.billing_month = '{billing_month}' "
-            f"WHERE ct.card_id = '{card_id}' "
-            f"  AND ct.txn_date BETWEEN bs.start_date AND bs.end_date "
-            f"  AND ct.txn_type = 'purchase' "
-            f"GROUP BY ct.category_name ORDER BY total_spend DESC"
-        ),
-        "top_merchants": (
-            f"SELECT ct.merchant_name, SUM(ct.amount) AS total, COUNT(*) AS txns "
-            f"FROM card_transactions ct "
-            f"JOIN billing_statements bs ON bs.card_id = ct.card_id "
-            f"  AND bs.billing_month = '{billing_month}' "
-            f"WHERE ct.card_id = '{card_id}' "
-            f"  AND ct.txn_date BETWEEN bs.start_date AND bs.end_date "
-            f"  AND ct.txn_type = 'purchase' "
-            f"GROUP BY ct.merchant_name ORDER BY total DESC LIMIT 5"
-        ),
-        "international_transactions": (
-            f"SELECT ct.txn_date::text, ct.merchant_name, ct.amount, "
-            f"ct.original_currency, ct.original_amount, ct.category_name "
-            f"FROM card_transactions ct "
-            f"JOIN billing_statements bs ON bs.card_id = ct.card_id "
-            f"  AND bs.billing_month = '{billing_month}' "
-            f"WHERE ct.card_id = '{card_id}' "
-            f"  AND ct.is_international = TRUE "
-            f"  AND ct.txn_date BETWEEN bs.start_date AND bs.end_date "
-            f"  AND ct.txn_type = 'purchase' "
-            f"ORDER BY ct.txn_date DESC"
-        ),
-        "reward_points": (
-            f"SELECT cc.reward_points AS current_balance, "
-            f"cc.reward_points * 0.25 AS redemption_value_inr, "
-            f"COALESCE(SUM(rt.points_earned), 0) AS earned_this_cycle, "
-            f"COALESCE(SUM(rt.points_redeemed), 0) AS redeemed_this_cycle "
-            f"FROM credit_cards cc "
-            f"LEFT JOIN reward_transactions rt ON rt.card_id = cc.card_id "
-            f"  AND rt.txn_date BETWEEN ("
-            f"    SELECT start_date FROM billing_statements "
-            f"    WHERE card_id = '{card_id}' AND billing_month = '{billing_month}') "
-            f"  AND ("
-            f"    SELECT end_date FROM billing_statements "
-            f"    WHERE card_id = '{card_id}' AND billing_month = '{billing_month}') "
-            f"WHERE cc.card_id = '{card_id}' GROUP BY cc.reward_points"
-        ),
-        "mom_comparison": (
-            f"SELECT TO_CHAR(txn_date, 'YYYY-MM') AS month, "
-            f"SUM(amount) FILTER (WHERE txn_type = 'purchase') AS total_purchases, "
-            f"COUNT(*) FILTER (WHERE txn_type = 'purchase') AS txn_count "
-            f"FROM card_transactions WHERE card_id = '{card_id}' "
-            f"  AND TO_CHAR(txn_date, 'YYYY-MM') IN ('{billing_month}', '{prev_month}') "
-            f"GROUP BY TO_CHAR(txn_date, 'YYYY-MM') ORDER BY month"
-        ),
-        "fee_waiver": (
-            f"SELECT cc.card_id, cc.card_variant, SUM(ct.amount) AS ytd_spend, "
-            f"CASE cc.card_variant "
-            f"  WHEN 'NorthStar Classic'   THEN 50000 "
-            f"  WHEN 'NorthStar Gold'      THEN 100000 "
-            f"  WHEN 'NorthStar Platinum'  THEN 300000 "
-            f"  WHEN 'NorthStar Signature' THEN 700000 "
-            f"  ELSE 100000 END AS fee_waiver_target, "
-            f"GREATEST(0, CASE cc.card_variant "
-            f"  WHEN 'NorthStar Classic'   THEN 50000 "
-            f"  WHEN 'NorthStar Gold'      THEN 100000 "
-            f"  WHEN 'NorthStar Platinum'  THEN 300000 "
-            f"  WHEN 'NorthStar Signature' THEN 700000 "
-            f"  ELSE 100000 END - SUM(ct.amount)) AS remaining_to_waiver "
-            f"FROM credit_cards cc "
-            f"JOIN card_transactions ct ON cc.card_id = ct.card_id "
-            f"WHERE cc.card_id = '{card_id}' AND ct.txn_type = 'purchase' "
-            f"  AND EXTRACT(YEAR FROM ct.txn_date) = {year_int} "
-            f"GROUP BY cc.card_id, cc.card_variant"
-        ),
-    }
-
-    for key, sql in queries.items():
-        sql_list.append(sql)
-        try:
-            ctx[key] = execute_sql(sql)
-        except Exception as e:
-            print(f"[spend_summary] {key} query failed: {e}")
-            ctx[key] = []
-
-    return ctx, sql_list
 
 
 # ─────────────────────────────────────────────
@@ -320,36 +179,32 @@ def sql_search_node(state: AgentState) -> AgentState:
     history  = state.get("conversation_history") or []
     enriched = _enrich_query(state["query"], history)
 
-    if _is_spend_summary(state["query"]):
-        card_id, billing_month = _extract_card_and_month(enriched)
-        if card_id and billing_month:
-            print(f"[sql_search_node] spend-summary path card={card_id} month={billing_month}")
-            try:
-                ctx, sql_list = _run_spend_summary_queries(card_id, billing_month)
-                return {**state, "spend_context": ctx, "sql_queries_run": sql_list,
-                        "sql_executed": None, "sql_results": None}
-            except Exception as e:
-                print(f"[sql_search_node] spend-summary failed: {e}")
-                return {**state, "spend_context": {"error": str(e)}, "sql_queries_run": [],
-                        "sql_executed": None, "sql_results": None}
-        else:
-            print(f"[sql_search_node] could not parse card/month from query, falling back to NL2SQL")
-
-    # Generic NL2SQL path
+    # ── Generic NL2SQL path ─────────────────────────────
     try:
+        # LLM generates SQL dynamically for any query
         result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched})
         sql = result.content.strip()
+        # Remove any markdown fences
         sql = re.sub(r'^```(?:sql)?\s*', '', sql)
         sql = re.sub(r'\s*```$', '', sql).strip()
         print(f"[sql_search_node] generated SQL: {sql[:120]}")
+
+        # Execute SQL
         rows = execute_sql(sql)
-        return {**state, "sql_executed": sql, "sql_results": rows,
-                "spend_context": None, "sql_queries_run": [sql]}
+
+        return {**state,
+                "sql_executed": sql,
+                "sql_results": rows,
+                "spend_context": None,
+                "sql_queries_run": [sql]}
+
     except Exception as e:
         print(f"[sql_search_node] NL2SQL failed: {e}")
-        return {**state, "sql_executed": "", "sql_results": [],
-                "spend_context": None, "sql_queries_run": []}
-
+        return {**state,
+                "sql_executed": "",
+                "sql_results": [],
+                "spend_context": None,
+                "sql_queries_run": []}
 
 # ─────────────────────────────────────────────
 # Node 4: Response
