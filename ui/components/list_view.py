@@ -12,8 +12,8 @@ from datetime import datetime
 
 import streamlit as st
 
-from ui.state import start_new_chat, go_to_list
-from ui.api_client import fetch_conversations, load_conversation_messages
+from state import start_new_chat, go_to_list
+from api_client import fetch_conversations, load_conversation_messages
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -12,22 +12,24 @@ def search_keyword(
         rows = conn.execute(
             """
             SELECT
-                id,
-                chunk_text,
-                content_type,
-                page_number,
-                section_name,
-                metadata,
-                position,
+                dc.id,
+                dc.chunk_text,
+                dc.content_type,
+                dc.page_number,
+                dc.section_name,
+                dc.metadata,
+                dc.position,
+                d.document_name,
                 ts_rank_cd(
-                    search_vector,
+                    dc.search_vector,
                     plainto_tsquery(
                         'english',
                         %s
                     )
                 ) AS score
-            FROM document_chunks
-            WHERE search_vector @@ plainto_tsquery(
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            WHERE dc.search_vector @@ plainto_tsquery(
                 'english',
                 %s
             )
@@ -49,6 +51,7 @@ def search_keyword(
             content_type=r["content_type"],
             page_number=r["page_number"],
             section_name=r["section_name"],
+            document_name=r["document_name"],
             metadata=r["metadata"] or {},
             position=r["position"],
         )

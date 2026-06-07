@@ -14,10 +14,10 @@ Run with:
 
 import streamlit as st
 
-from ui.state import init_session_state
-from ui.components.header import render_header, render_error_banner
-from ui.components.list_view import render_list_view
-from ui.components.chat import (
+from state import init_session_state
+from components.header import render_header, render_error_banner
+from components.list_view import render_list_view
+from components.chat import (
     render_chat_controls,
     render_conversation,
     render_input_bar,
@@ -135,7 +135,8 @@ section.main,
     border-radius: 16px;
     font-size: 0.88rem;
     line-height: 1.6;
-    word-break: break-word;
+    overflow-wrap: break-word;
+    min-width: 60px;
 }
 .cs-bubble.user {
     background: linear-gradient(135deg, #3b5bdb, #4c6ef5);

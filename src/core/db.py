@@ -49,6 +49,8 @@ def _get_connection() -> psycopg.Connection:
     """
     return psycopg.connect(settings.pg_connection_string, row_factory=dict_row)
 
+    
+
 
 @contextmanager
 def get_db() -> Generator[psycopg.Connection, None, None]:

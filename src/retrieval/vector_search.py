@@ -7,7 +7,7 @@ from src.retrieval.schemas import RetrievedChunk
 from src.retrieval.reranker import rerank_results
 
 
-VECTOR_TOP_K = 20
+VECTOR_TOP_K = 10
 FINAL_TOP_K = 5
 
 
@@ -18,7 +18,24 @@ def _vector_to_pg(vector: list[float]) -> str:
 def search_semantic(
     query: str,
     top_k: int = FINAL_TOP_K,
+    rerank: bool = True,
 ) -> list[RetrievedChunk]:
+    """
+    Semantic retrieval using pgvector.
+
+    Flow:
+        Query
+          ↓
+        Embed Query
+          ↓
+        Cosine Similarity Search
+          ↓
+        Top 10 Candidates
+          ↓
+        (Optional) Cohere Rerank
+          ↓
+        Final Results
+    """
 
     query_embedding = embed_query(query)
 
@@ -28,16 +45,18 @@ def search_semantic(
         rows = conn.execute(
             """
             SELECT
-                id,
-                chunk_text,
-                content_type,
-                page_number,
-                section_name,
-                metadata,
-                position,
-                1 - (embedding <=> %s::vector) AS score
-            FROM document_chunks
-            ORDER BY embedding <=> %s::vector
+                dc.id,
+                dc.chunk_text,
+                dc.content_type,
+                dc.page_number,
+                dc.section_name,
+                dc.metadata,
+                dc.position,
+                d.document_name,
+                1 - (dc.embedding <=> %s::vector) AS score
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            ORDER BY dc.embedding <=> %s::vector
             LIMIT %s
             """,
             (
@@ -55,14 +74,18 @@ def search_semantic(
             content_type=r["content_type"],
             page_number=r["page_number"],
             section_name=r["section_name"],
+            document_name=r["document_name"],
             metadata=r["metadata"] or {},
             position=r["position"],
         )
         for r in rows
     ]
 
+    if not rerank:
+        return chunks
+
     return rerank_results(
         query=query,
         chunks=chunks,
-        top_k=top_k,
+        top_k=min(top_k, len(chunks)),
     )

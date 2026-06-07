@@ -1,121 +1,91 @@
 """
 src/agents/graph.py
 
-LangGraph state machine for the credit card RAG agent.
+LangGraph state machine for the Credit Card Spend Summarizer.
 
-Workflow:
-    router_node
-        ├─→ "knowledge_base" ──→ kb_search_node ──→ rerank_node ──→ response_node ──→ END
-        └─→ "sql_query" ─────────────────────────→ sql_search_node ──→ response_node ──→ END
-
-The router decides which path based on query classification.
-Both paths converge at response_node to generate the final answer.
+Flow:
+    history_loader → router → kb_search   → response → END
+                           └→ sql_search  ↗
 """
 
-import logging
 from typing import Literal
-
 from langgraph.graph import StateGraph, END
 
 from src.agents.nodes import (
     AgentState,
+    history_loader_node,
     router_node,
     kb_search_node,
     sql_search_node,
-    rerank_node,
     response_node,
 )
 
-logger = logging.getLogger(__name__)
-
-
-def _route_decision(state: AgentState) -> Literal["knowledge_base", "sql_query"]:
-    """Routing function: determine next node based on router decision."""
-    route = state.get("route", "knowledge_base")
-    return route
-
 
 def build_agent_graph():
-    """Build and compile the LangGraph state machine."""
-    
-    # Create the graph
     graph = StateGraph(AgentState)
-    
-    # Add all nodes
-    graph.add_node("router", router_node)
-    graph.add_node("kb_search", kb_search_node)
-    graph.add_node("rerank", rerank_node)
-    graph.add_node("sql_search", sql_search_node)
-    graph.add_node("response", response_node)
-    
-    # Set entry point
-    graph.set_entry_point("router")
-    
-    # Conditional routing from router
-    # Split into knowledge_base path or sql_query path
+
+    graph.add_node("history_loader", history_loader_node)
+    graph.add_node("router",         router_node)
+    graph.add_node("kb_search",      kb_search_node)
+    graph.add_node("sql_search",     sql_search_node)
+    graph.add_node("response",       response_node)
+
+    graph.set_entry_point("history_loader")
+    graph.add_edge("history_loader", "router")
+
     graph.add_conditional_edges(
         "router",
-        _route_decision,
-        {
-            "knowledge_base": "kb_search",
-            "sql_query": "sql_search",
-        }
+        lambda state: state.get("route", "knowledge_base"),
+        {"knowledge_base": "kb_search", "sql_query": "sql_search"},
     )
-    
-    # KB path: search → rerank → response → END
-    graph.add_edge("kb_search", "rerank")
-    graph.add_edge("rerank", "response")
-    graph.add_edge("response", END)
-    
-    # SQL path: search → response → END
+
+    graph.add_edge("kb_search",  "response")
     graph.add_edge("sql_search", "response")
-    
-    # Compile the graph
-    compiled_agent = graph.compile()
-    logger.info("[build_agent_graph] LangGraph compiled successfully")
-    
-    return compiled_agent
+    graph.add_edge("response",   END)
+
+    compiled = graph.compile()
+    print("[build_agent_graph] compiled successfully")
+    return compiled
 
 
-# Singleton: compile once at module load, reuse for all requests
+# Singleton — compiled once at module load
 credit_card_agent = build_agent_graph()
 
 
-def run_credit_card_agent(query: str) -> dict:
-    """
-    Execute the credit card agent.
-    
-    Args:
-        query: User's natural language question
-    
-    Returns:
-        Dict with final response (see AgentResponse schema)
-    """
-    initial_state = {
+def run_credit_card_agent(query: str, session_id: str = "") -> dict:
+    initial_state: AgentState = {
         "query": query,
+        "session_id": session_id,
+        "conversation_history": None,
         "route": "",
-        "router_reason": "",
-        "retrieved_docs": [],
-        "reranked_docs": [],
-        "generated_sql": "",
-        "sql_result": "",
-        "response": {}
+        "chunks": [],
+        "sql_executed": None,
+        "sql_results": None,
+        "spend_context": None,
+        "sql_queries_run": [],
+        "response": None,
     }
-    
+
     try:
-        logger.info(f"[run_credit_card_agent] Processing query: {query[:80]}...")
         final_state = credit_card_agent.invoke(initial_state)
-        response = final_state.get("response", {})
-        logger.info(f"[run_credit_card_agent] Route taken: {response.get('route_taken', 'unknown')}")
+        response    = final_state.get("response")
+
+        if response is None:
+            raise ValueError("Agent produced no response object")
+
+        if hasattr(response, "model_dump"):
+            response = response.model_dump()
+
+        print(f"[run_credit_card_agent] route={response.get('route_taken','?')}")
         return response
-    
-    except Exception as exc:
-        logger.error(f"[run_credit_card_agent] Error: {exc}")
+
+    except Exception as e:
+        print(f"[run_credit_card_agent] error: {e}")
         return {
-            "query": query,
-            "answer": f"Sorry, I encountered an error processing your query: {exc}",
-            "data_sources": "error",
-            "page_no": "N/A",
+            "query":         query,
+            "answer":        f"Sorry, I encountered an error: {e}",
+            "data_sources":  [],
+            "page_no":       "N/A",
             "document_name": "error",
-            "route_taken": "error"
+            "route_taken":   "error",
         }

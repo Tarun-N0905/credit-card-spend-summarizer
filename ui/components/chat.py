@@ -10,8 +10,8 @@ Imported by:
 
 import streamlit as st
 
-from ui.state import add_message, clear_error, go_to_list
-from ui.api_client import send_chat_message, delete_conversation
+from state import add_message, clear_error, go_to_list
+from api_client import send_chat_message, delete_conversation
 
 
 # ── Chat controls ─────────────────────────────────────────────────────────────
@@ -154,26 +154,30 @@ def render_input_bar() -> None:
     before the blocking HTTP request fires — without this the UI
     appears frozen until the API responds.
     """
+    if "input_reset_counter" not in st.session_state:
+        st.session_state.input_reset_counter = 0
+ 
     with st.container():
         col_input, col_btn = st.columns([6, 1])
-
+ 
         with col_input:
             user_input = st.text_input(
                 label="message",
                 label_visibility="collapsed",
                 placeholder="Ask about your spend, rewards, or card benefits…",
-                key="chat_input",
+                key=f"chat_input_{st.session_state.input_reset_counter}",
             )
-
+ 
         with col_btn:
             send_clicked = st.button("Send", key="send_btn")
-
+ 
     if send_clicked and user_input.strip():
         clear_error()
         add_message("user", user_input.strip())
         st.session_state.is_loading = True
+        st.session_state.input_reset_counter += 1  # mounts a fresh empty input on rerun
         st.rerun()
-
+ 
     if st.session_state.is_loading:
         reply = send_chat_message(st.session_state.messages[-1]["content"])
         st.session_state.is_loading = False
