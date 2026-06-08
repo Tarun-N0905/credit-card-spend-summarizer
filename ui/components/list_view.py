@@ -100,11 +100,17 @@ def render_empty_conversations_state() -> None:
 
 def render_conversation_card(conv: dict, index: int) -> None:
     """
-    Render a single past conversation card with Open and Delete buttons.
+    Render a single past conversation card with Continue and Delete buttons
+    pinned to the right side of the card.
 
-    Delete triggers confirm_delete flow: inline confirmation replaces
-    the card buttons. Confirmed delete calls delete_conversation() and
-    refreshes the list.
+    Layout:
+        ┌─────────────────────────────────────────────────────┐
+        │  preview text (truncated)       [Continue] [Delete] │
+        │  date label                                          │
+        └─────────────────────────────────────────────────────┘
+
+    Delete triggers inline confirm flow. Confirmed delete calls
+    delete_conversation() and refreshes the list.
 
     Args:
         conv  : Dict with keys: session_id, preview, created_at
@@ -113,25 +119,78 @@ def render_conversation_card(conv: dict, index: int) -> None:
     safe_preview = html.escape(conv.get("preview", "No messages yet"))
     date_label = _format_date(conv.get("created_at", ""))
     session_id = conv["session_id"]
+    confirm_key = f"confirm_delete_card_{index}"
 
+    # ── Card shell — flex row: text on left, buttons on right ────────────────
+    # We render the card HTML, then use an overlapping columns trick:
+    # a 1-px-height negative-margin container pulls Streamlit buttons
+    # up into the card's visual space using CSS positioning.
     st.markdown(
         f"""
-    <div class="cs-card">
+<div class="cs-card cs-card-row">
+    <div class="cs-card-text">
         <div class="cs-card-preview">{safe_preview}</div>
         <div class="cs-card-date">{date_label}</div>
     </div>
-    """,
+    <div class="cs-card-actions-placeholder"></div>
+</div>
+<style>
+  /* Card flex layout */
+  .cs-card.cs-card-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.65rem 0.85rem;
+  }}
+  .cs-card-text {{
+      flex: 1;
+      min-width: 0;   /* allow text truncation inside flex child */
+  }}
+  /* Pull the immediately following Streamlit column block up into the card */
+  .cs-card-row + div[data-testid="stHorizontalBlock"] {{
+      margin-top: -3.05rem;
+      margin-bottom: 0.4rem;
+      padding-right: 0.5rem;
+      display: flex;
+      justify-content: flex-end;
+  }}
+  /* Make each button column as narrow as its content */
+  .cs-card-row + div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{
+      flex: 0 0 auto !important;
+      width: auto !important;
+      min-width: 0 !important;
+      padding: 0 3px !important;
+  }}
+  /* Compact button sizing for card actions */
+  .cs-card-row + div[data-testid="stHorizontalBlock"] button {{
+      padding: 0.28rem 0.7rem !important;
+      font-size: 0.75rem !important;
+      width: auto !important;
+      min-width: 0 !important;
+      border-radius: 2px !important;
+  }}
+  /* Delete button — use VSCode error red */
+  .cs-card-row + div[data-testid="stHorizontalBlock"] div[data-testid="stColumn"]:last-child button {{
+      background: transparent !important;
+      border: 1px solid #f44747 !important;
+      color: #f48771 !important;
+  }}
+  .cs-card-row + div[data-testid="stHorizontalBlock"] div[data-testid="stColumn"]:last-child button:hover {{
+      background: #1f1a1a !important;
+  }}
+</style>
+""",
         unsafe_allow_html=True,
     )
 
-    # Inline delete confirmation state per card
-    confirm_key = f"confirm_delete_card_{index}"
+    # ── Inline delete confirmation ────────────────────────────────────────────
     if st.session_state.get(confirm_key):
         st.markdown(
-            '<div class="cs-confirm">Delete this conversation? Cannot be undone.</div>',
+            '<div class="cs-confirm">⚠ Delete this conversation? This cannot be undone.</div>',
             unsafe_allow_html=True,
         )
-        cy, cn, _ = st.columns([2, 2, 6])
+        _, cy, cn = st.columns([6, 2, 2])
         with cy:
             if st.button("Yes, Delete", key=f"del_yes_{index}"):
                 from api_client import delete_conversation
@@ -144,9 +203,10 @@ def render_conversation_card(conv: dict, index: int) -> None:
                 st.session_state[confirm_key] = False
                 st.rerun()
     else:
-        col_open, col_del, col_spacer = st.columns([2, 2, 6])
-        with col_open:
-            if st.button("Open", key=f"open_conv_{index}"):
+        # Spacer + two right-aligned action buttons
+        _, col_cont, col_del = st.columns([7, 2, 2])
+        with col_cont:
+            if st.button("▶  Continue", key=f"open_conv_{index}"):
                 success = load_conversation_messages(session_id)
                 if success:
                     st.session_state.session_id = session_id
