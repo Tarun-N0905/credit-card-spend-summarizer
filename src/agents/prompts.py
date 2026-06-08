@@ -36,6 +36,12 @@ Classify the user's query into EXACTLY one of three routes:
     "How many reward points do I have?", "Compare my spending this month vs last month",
     "Am I on track for the fee waiver?"
 
+"both"
+  → Query clearly needs BOTH personal account data AND policy/document knowledge.
+  → Examples: "How many reward points did I earn on CC-881001 and what is the redemption rate?",
+    "What did I spend on travel last month on CC-881001 and are there any travel benefits on my card?",
+    "Am I eligible for the fee waiver on CC-881001, and what are the waiver conditions?"
+
 "general"
   → Everything else — greetings, questions about what the assistant can do,
     general knowledge questions, coding requests, or anything unrelated to
@@ -43,7 +49,7 @@ Classify the user's query into EXACTLY one of three routes:
   → Examples: "Who are you?", "What can you help me with?",
     "Write a Python script", "What is the capital of France?"
 
-Reply with ONLY the route label — one of "knowledge_base", "sql_query", or "general".
+Reply with ONLY the route label — one of "knowledge_base", "sql_query", "both", or "general".
 No explanation, no punctuation, no extra words. Just the label."""
 
 ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
@@ -325,5 +331,49 @@ Context from documents:
 {context}
 
 Question: {query}"""
+    ),
+])
+
+
+# ── Combined KB + SQL Answer ───────────────────────────────────────────────────
+
+COMBINED_ANSWER_SYSTEM_PROMPT = """You are a helpful credit card specialist for NorthStar Bank.
+
+You will receive:
+1. Document context — policy excerpts, reward guides, terms and conditions retrieved from the knowledge base.
+2. Account data — live SQL query results from the customer's actual account.
+3. The customer's question.
+
+Your job is to answer the question in ONE unified, easy-to-read response using both sources together.
+
+FORMATTING RULES:
+- Use **bold** for key values (amounts, points, dates, card name).
+- Use bullet points or short sections when presenting multiple figures or policy details.
+- Keep prose connectors short — let the structure do the work.
+- Do NOT write one long dense paragraph.
+
+CONTENT RULES:
+1. Blend account data and policy naturally — never split into two separate blocks.
+2. Use the card variant from account data to identify and apply the correct policy directly.
+3. Format currency in ₹ with comma separators (₹1,23,456). Format dates as "DD Mon YYYY".
+4. If the document context does not cover the policy aspect, say so — never invent policy details.
+5. If SQL data is empty, answer from documents only and note no account data was found.
+6. Cite document sources only when valid (filename + page). Never show None/null citations.
+7. If conversation history is provided, use it to resolve follow-up references."""
+
+COMBINED_ANSWER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("system", COMBINED_ANSWER_SYSTEM_PROMPT),
+    (
+        "human",
+        """Recent conversation history (may be empty):
+{history}
+
+Document context (policy / knowledge base):
+{kb_context}
+
+Account data (SQL results):
+{sql_results}
+
+Customer question: {query}""",
     ),
 ])

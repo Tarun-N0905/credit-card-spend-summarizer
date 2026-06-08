@@ -1,7 +1,7 @@
 import logging
 from src.retrieval.hybrid_search import search_hybrid
 from src.retrieval.reranker import rerank_results
-from src.retrieval.schema import RetrievedChunk
+from src.retrieval.schemas import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,9 @@ def retrieve(query: str, top_k: int = 5) -> list[RetrievedChunk]:
             logger.warning("rag_service: no chunks returned for query: %s", query)
             return []
         reranked = rerank_results(query, chunks, top_k=top_k)
-        logger.info("rag_service: retrieved %d chunks for query: %s", len(reranked), query)
+        logger.info(
+            "rag_service: retrieved %d chunks for query: %s", len(reranked), query
+        )
         return reranked
     except Exception as e:
         logger.error("rag_service: retrieval failed: %s", e)

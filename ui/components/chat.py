@@ -72,8 +72,9 @@ def render_message(role: str, content: str, timestamp: str) -> None:
     """
     Render a single chat bubble with correct alignment and styling.
 
-    Content is HTML-escaped before injection so special characters
-    (< > & " ') in assistant replies or user input never break the layout.
+    User messages are HTML-escaped (plain text input, no markdown expected).
+    Assistant messages are rendered with st.markdown so bold, bullets, and
+    other formatting from the LLM display correctly instead of showing raw **.
 
     Args:
         role      : "user" → right-aligned blue bubble
@@ -81,15 +82,22 @@ def render_message(role: str, content: str, timestamp: str) -> None:
         content   : message text to display inside the bubble
         timestamp : HH:MM string shown below the bubble
     """
-    safe_content = html.escape(content)
-    st.markdown(f"""
-    <div class="cs-msg-row {role}">
-        <div>
-            <div class="cs-bubble {role}">{safe_content}</div>
-            <div class="cs-ts">{timestamp}</div>
+    if role == "user":
+        safe_content = html.escape(content)
+        st.markdown(f"""
+        <div class="cs-msg-row {role}">
+            <div>
+                <div class="cs-bubble {role}">{safe_content}</div>
+                <div class="cs-ts">{timestamp}</div>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f'''<div class="cs-msg-row {role}"><div><div class="cs-bubble {role}">''',
+                    unsafe_allow_html=True)
+        st.markdown(content)
+        st.markdown(f'''</div><div class="cs-ts">{timestamp}</div></div></div>''',
+                    unsafe_allow_html=True)
 
 
 def render_message_images(image_paths: list[str]) -> None:

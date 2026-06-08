@@ -53,7 +53,7 @@ def clear_error() -> None:
     st.session_state.error = None
 
 
-def add_message(role: str, content: str) -> None:
+def add_message(role: str, content: str, image_paths: list[str] | None = None) -> None:
     """
     Append a new message dict to st.session_state.messages.
 
@@ -65,6 +65,7 @@ def add_message(role: str, content: str) -> None:
         "role": role,
         "content": content,
         "timestamp": datetime.now().strftime("%H:%M"),
+        "image_paths": image_paths or [],
     })
 
 
