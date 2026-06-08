@@ -1,29 +1,27 @@
-
-
 """
 src/ingestion/docling_parser.py
 
-Responsible for converting a raw PDF into a flat list of typed content
-chunks using Docling's layout analysis pipeline.
+Converts a raw PDF into a flat list of typed content chunks using Docling's
+layout analysis pipeline.
 
 Each chunk carries:
   content      — text representation of the element
   content_type — "text" | "table" | "image"
   metadata     — page_number, section, source_file, element_type, position
 
-Images are NOT stored as base64 in the database. Instead, the raw bytes
-are passed to GPT-4o vision (via _describe_image_with_vision_model) and
-only the resulting description text is stored as the chunk content.
-
-If the vision API call fails for any reason, ingestion continues with a
-fallback description — a failed image never aborts the pipeline.
+Images are NOT stored as base64 in the database. Instead, raw bytes are sent
+to GPT-4o vision and only the resulting description text is stored as chunk
+content. A failed vision call never aborts the pipeline — a safe fallback is
+used instead.
 """
 
 import base64
 import io
 import logging
 import os
+from pathlib import Path
 
+from PIL import Image
 from dotenv import load_dotenv
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -34,17 +32,20 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Vision model used exclusively during ingestion to describe images.
-# The chat model (gpt-5.4) does not support vision, so a separate
-# OPENAI_VISION_MODEL env var points to gpt-4o.
+# Constants
 # ---------------------------------------------------------------------------
+
+# Vision model used during ingestion to describe embedded images.
+# The chat model does not support vision, so a separate env var is used.
 _VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
+_VISION_MAX_TOKENS = 512
 
 _VISION_PROMPT = (
     "You are analyzing an image extracted from a financial document "
@@ -55,9 +56,11 @@ _VISION_PROMPT = (
     "Output only the description, no preamble."
 )
 
-# ---------------------------------------------------------------------------
-# Docling label taxonomy (DocItemLabel enum values we care about):
-#
+# Text chunking — tuned for 3–4 page PDFs.
+_CHUNK_SIZE = 500
+_CHUNK_OVERLAP = 100
+
+# Docling label taxonomy we care about:
 #   section_header  — numbered or unnumbered section headings
 #   title           — document-level title
 #   text / paragraph— body paragraphs
@@ -67,8 +70,17 @@ _VISION_PROMPT = (
 #   table           — tabular data (Docling reconstructs cell structure)
 #   picture         — embedded raster / vector images
 #   chart           — chart/graph images (rendered image, no raw data)
-#   page_header     — running header printed on every page  ← NOISE, skipped
-#   page_footer     — running footer printed on every page  ← NOISE, skipped
+#   page_header     — running header printed on every page  ← SKIPPED (noise)
+#   page_footer     — running footer printed on every page  ← SKIPPED (noise)
+
+_SKIP_LABELS = {"page_header", "page_footer"}
+_HEADING_LABELS = {"section_header", "title"}
+_TABLE_LABELS = {"table"}
+_IMAGE_LABELS = {"picture", "figure", "chart"}
+
+
+# ---------------------------------------------------------------------------
+# Image helpers
 # ---------------------------------------------------------------------------
 
 
@@ -78,19 +90,18 @@ def _describe_image_with_vision_model(img_b64: str, page_no: int | None) -> str:
     The description becomes the chunk's searchable text content — far more
     useful than a sparse caption for embedding and retrieval.
 
-    A failed vision call must NEVER abort ingestion. Any exception is caught,
-    logged as a warning, and a safe fallback string is returned so the pipeline
-    continues processing the rest of the document.
+    A failed vision call never aborts ingestion. Any exception is caught,
+    logged as a warning, and a safe fallback string is returned.
 
     Args:
         img_b64 : Base64-encoded PNG string of the extracted image.
         page_no : Page number the image was found on (used in fallback text).
 
     Returns:
-        A descriptive string from the vision model, or a fallback placeholder.
+        Descriptive string from the vision model, or a fallback placeholder.
     """
     try:
-        llm = ChatOpenAI(model=_VISION_MODEL, max_tokens=512)
+        llm = ChatOpenAI(model=_VISION_MODEL, max_tokens=_VISION_MAX_TOKENS)
         message = HumanMessage(
             content=[
                 {"type": "text", "text": _VISION_PROMPT},
@@ -101,8 +112,10 @@ def _describe_image_with_vision_model(img_b64: str, page_no: int | None) -> str:
             ]
         )
         response = llm.invoke([message])
-        print(response.content.strip())  # Debug: log the raw vision response
-        return response.content.strip()
+        description = response.content.strip()
+        logger.debug("Vision model response for page %s: %s", page_no, description)
+        return description
+
     except Exception as exc:
         logger.warning(
             "Image description failed on page %s — using fallback. Error: %s",
@@ -145,66 +158,144 @@ def _extract_image_b64(node, doc) -> str | None:
     return None
 
 
-def _table_to_text(node, doc) -> str:
-    """Convert a Docling table node into clean plain-text rows.
+def _save_image_locally(
+    img_b64: str,
+    source_file: str,
+    page_no: int,
+    image_idx: int,
+) -> str:
+    """Save an extracted image to disk and return its path.
 
-    Serialises each row as "Col1: val1  |  Col2: val2" so that column
-    context travels with every value and embeddings are meaningful.
-
-    Fallback chain:
-      1. export_to_dataframe() — preferred; structured rows/cols
-      2. export_to_html() with tags stripped — when DataFrame is unavailable
-      3. node.text — last resort raw text
-
-    Args:
-        node : Docling table DocItem node.
-        doc  : The parent DoclingDocument (needed for some export methods).
-
-    Returns:
-        Plain-text representation of the table, or empty string if extraction
-        fails entirely.
+    Images are saved under data/images/<doc_name>/ with filenames
+    like page_2_img_1.png for easy traceability.
     """
-    # ── Strategy 1: DataFrame ─────────────────────────────────────────────
+    doc_name = Path(source_file).stem
+    image_dir = Path("data/images") / doc_name
+    image_dir.mkdir(parents=True, exist_ok=True)
+
+    image_path = image_dir / f"page_{page_no}_img_{image_idx}.png"
+    img = Image.open(io.BytesIO(base64.b64decode(img_b64)))
+    img.save(image_path)
+
+    return str(image_path)
+
+
+# ---------------------------------------------------------------------------
+# Table helper
+# ---------------------------------------------------------------------------
+
+
+def _table_to_text(node, doc) -> str:
+    """Convert a Docling table node into readable plain text.
+
+    Extraction strategy (in order of preference):
+      1. DataFrame export  — structured row/column text
+      2. HTML export       — tags stripped, whitespace collapsed
+      3. node.text         — raw fallback
+    """
+
+    # Strategy 1: DataFrame
     if hasattr(node, "export_to_dataframe"):
         try:
             df = node.export_to_dataframe()
             if df is not None and not df.empty:
-                rows_text: list[str] = []
                 headers = [str(c).strip() for c in df.columns]
+
+                # If Docling used numeric column indices, promote first row as header
+                if all(h.isdigit() for h in headers) and len(df) > 0:
+                    df.columns = df.iloc[0]
+                    df = df.iloc[1:].reset_index(drop=True)
+                    headers = [str(c).strip() for c in df.columns]
+
+                rows_text = []
                 for _, row in df.iterrows():
                     pairs = [
                         f"{h}: {str(v).strip()}"
                         for h, v in zip(headers, row)
                         if str(v).strip() not in ("", "nan", "None")
+                        and not h.lower().startswith("unnamed")
                     ]
                     if pairs:
-                        rows_text.append("  |  ".join(pairs))
+                        rows_text.append(" | ".join(pairs))
+
                 if rows_text:
-                    return "\n".join(rows_text)
+                    # Guard: if the average number of populated pairs per row
+                    # is below 1.5 the DataFrame structure is likely degenerate
+                    # (column values bleeding, repeated prefix artefacts, etc).
+                    # Fall through to HTML export rather than persisting with
+                    # garbled output.
+                    total_pairs = sum(
+                        len(r.split(" | ")) for r in rows_text
+                    )
+                    avg_pairs = total_pairs / len(rows_text)
+                    if avg_pairs >= 1.5:
+                        return "\n".join(rows_text)
+                    logger.debug(
+                        "DataFrame output looks garbled (avg_pairs=%.2f) — "
+                        "falling back to HTML export",
+                        avg_pairs,
+                    )
+
         except Exception as exc:
             logger.debug("DataFrame export failed: %s", exc)
 
-    # ── Strategy 2: HTML stripped of tags ─────────────────────────────────
+    # Strategy 2: HTML export
     if hasattr(node, "export_to_html"):
         try:
-            import re as _re
-            raw_html = node.export_to_html(doc)
-            text = _re.sub(r"<[^>]+>", " ", raw_html or "")
-            text = _re.sub(r"\s+", " ", text).strip()
+            import re
+
+            html = node.export_to_html(doc)
+            text = re.sub(r"<[^>]+>", " ", html or "")
+            text = re.sub(r"\s+", " ", text).strip()
             if text:
                 return text
         except Exception as exc:
             logger.debug("HTML export failed: %s", exc)
 
-    # ── Strategy 3: Raw text attribute ────────────────────────────────────
+    # Strategy 3: Raw text fallback
     return getattr(node, "text", "") or ""
+
+
+# ---------------------------------------------------------------------------
+# Text chunking helper
+# ---------------------------------------------------------------------------
+
+
+def _split_text(text: str) -> list[str]:
+    """Split a long text block into overlapping chunks.
+
+    For short texts (under _CHUNK_SIZE chars) no splitting is done.
+    Separators never include the empty string so the splitter will not
+    cut mid-word; a chunk may slightly exceed _CHUNK_SIZE rather than
+    produce a partial token.
+
+    Args:
+        text : Raw paragraph or body text.
+
+    Returns:
+        List of one or more text strings ready for embedding.
+    """
+    if len(text) <= _CHUNK_SIZE:
+        return [text]
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=_CHUNK_SIZE,
+        chunk_overlap=_CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " "],
+    )
+    return splitter.split_text(text)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def parse_document(file_path: str) -> list[dict]:
     """Parse a PDF into a flat list of typed content chunks using Docling.
 
     Each returned chunk is a dict with three keys:
-      content      — text or description of the element
+      content      — text or image description
       content_type — "text" | "table" | "image"
       metadata     — dict with content_type, element_type, section,
                      page_number, source_file, position (bounding box)
@@ -214,9 +305,9 @@ def parse_document(file_path: str) -> list[dict]:
       2. Run the full conversion pipeline on the PDF
       3. Walk the element tree, skipping page headers/footers
       4. Route each node to the appropriate handler:
-           - Headings/text  → plain text chunk
-           - Tables         → text representation chunk
-           - Pictures/charts → GPT-4o vision description chunk
+           text/paragraphs → split into overlapping chunks with section prefix
+           tables          → text representation (single chunk)
+           pictures/charts → GPT-4o vision description (single chunk)
 
     Args:
         file_path : Absolute or relative path to the source PDF.
@@ -226,12 +317,11 @@ def parse_document(file_path: str) -> list[dict]:
     """
 
     # ── Step 1: Configure Docling pipeline ───────────────────────────────
-    # do_ocr=True              — run OCR on scanned/rasterised pages
-    # do_table_structure=True  — detect table grid and reconstruct rows/cols
-    # generate_picture_images  — render each picture element to a PIL Image
+    # do_ocr=True             — run OCR on scanned/rasterised pages
+    # do_table_structure=True — detect table grid and reconstruct rows/cols
+    # generate_picture_images — render each picture element to a PIL Image
     #
-    # accelerator_options: CPU is pinned to avoid MPS float64 crash on Apple
-    # Silicon (Docling's layout model uses float64 which MPS rejects).
+    # CPU accelerator is pinned to avoid MPS float64 crash on Apple Silicon.
     pipeline_options = PdfPipelineOptions(
         do_ocr=True,
         do_table_structure=True,
@@ -251,27 +341,21 @@ def parse_document(file_path: str) -> list[dict]:
     doc = result.document
 
     parsed_chunks: list[dict] = []
-    # Tracks the most recently seen section heading so every chunk carries
-    # the section name it belongs to — useful for filtered retrieval.
-    current_section: str | None = None
+    current_section = "Document Content"
     source_file = os.path.basename(file_path)
+    image_counter = 0
 
     # ── Step 3: Walk the document element tree ────────────────────────────
     for item in doc.iterate_items():
-        if isinstance(item, tuple):
-            node, _ = item   # iterate_items() yields (node, level)
-        else:
-            node = item      # older Docling versions yield bare nodes
+        node, _ = item if isinstance(item, tuple) else (item, None)
 
-        # label is a DocItemLabel enum — convert to lowercase string
         label = str(getattr(node, "label", "")).lower()
 
-        # ── Skip page headers/footers ─────────────────────────────────
-        # These repeat on every page and pollute retrieval results.
-        if label in ("page_header", "page_footer"):
+        # Skip noisy repeating headers/footers
+        if label in _SKIP_LABELS:
             continue
 
-        # ── Extract page number and bounding box ──────────────────────
+        # Extract page number and bounding box
         prov = getattr(node, "prov", None)
         page_no = prov[0].page_no if prov else None
         position: dict | None = None
@@ -279,73 +363,86 @@ def parse_document(file_path: str) -> list[dict]:
             b = prov[0].bbox
             position = {"l": b.l, "t": b.t, "r": b.r, "b": b.b}
 
-        def _make_metadata(content_type: str, element_type: str) -> dict:
-            """Build a metadata dict stored alongside every chunk.
+        # Snapshot mutable state at this point in the loop
+        # (avoids stale closure issues if chunks were ever lazily evaluated)
+        snapshot_section = current_section
+        snapshot_page = page_no
+        snapshot_position = position
 
-            content_type  — "text" | "table" | "image"
-            element_type  — raw Docling label ("section_header", "table", …)
-            position      — bounding box JSONB {l, t, r, b} or None
-            """
+        def _make_metadata(content_type: str, element_type: str) -> dict:
             return {
                 "content_type": content_type,
                 "element_type": element_type,
-                "section": current_section,
-                "page_number": page_no,
+                "section": snapshot_section,
+                "page_number": snapshot_page,
                 "source_file": source_file,
-                "position": position,
+                "position": snapshot_position,
             }
 
         # ── Section headings & document title ─────────────────────────
-        # Update current_section so all subsequent chunks carry the
-        # correct section name until the next heading is encountered.
-        if "section_header" in label or label == "title":
+        if label in _HEADING_LABELS:
             text = getattr(node, "text", "").strip()
             if text:
                 current_section = text
-                parsed_chunks.append({
-                    "content": text,
-                    "content_type": "text",
-                    "metadata": _make_metadata("text", label),
-                })
+            continue
 
         # ── Tables ────────────────────────────────────────────────────
-        elif "table" in label:
-            table_text = _table_to_text(node, doc)
-            if table_text.strip():
-                parsed_chunks.append({
-                    "content": table_text.strip(),
-                    "content_type": "table",
-                    "metadata": _make_metadata("table", "table"),
-                })
+        elif label in _TABLE_LABELS:
+            table_text = _table_to_text(node, doc).strip()
+            if table_text:
+                parsed_chunks.append(
+                    {
+                        "content": table_text,
+                        "content_type": "table",
+                        "metadata": _make_metadata("table", "table"),
+                    }
+                )
 
         # ── Pictures, figures, and charts ─────────────────────────────
-        # Base64 is used only to call the vision model. The description
-        # text is stored — no base64 is written to the database.
-        elif "picture" in label or "figure" in label or label == "chart":
+        elif any(img_label in label for img_label in _IMAGE_LABELS):
+            image_counter += 1
             img_b64 = _extract_image_b64(node, doc)
+            metadata = _make_metadata("image", "picture")
 
-            # Skip decorative images (logos, dividers) below 100px
             if img_b64 is None:
-                caption = getattr(node, "text", "") or f"Image on page {page_no}"
-                content = caption.strip()
+                content = (
+                    getattr(node, "text", "") or f"Image on page {page_no}"
+                ).strip()
             else:
+                metadata["image_path"] = _save_image_locally(
+                    img_b64=img_b64,
+                    source_file=source_file,
+                    page_no=page_no,
+                    image_idx=image_counter,
+                )
                 content = _describe_image_with_vision_model(img_b64, page_no)
 
-            parsed_chunks.append({
-                "content": content,
-                "content_type": "image",
-                "metadata": _make_metadata("image", "picture"),
-            })
+            parsed_chunks.append(
+                {
+                    "content": content,
+                    "content_type": "image",
+                    "metadata": metadata,
+                }
+            )
 
         # ── Plain text: paragraphs, list items, captions, footnotes ───
         else:
             text = getattr(node, "text", "")
-            if text and text.strip():
-                parsed_chunks.append({
-                    "content": text.strip(),
-                    "content_type": "text",
-                    "metadata": _make_metadata("text", label),
-                })
+            if not text or not text.strip():
+                continue
 
-    logger.info("parse_document: %d elements extracted from %s", len(parsed_chunks), source_file)
+            for sub_chunk in _split_text(text.strip()):
+                parsed_chunks.append(
+                    {
+                        "content": sub_chunk,
+                        "content_type": "text",
+                        "metadata": _make_metadata("text", label),
+                    }
+                )
+
+    logger.info(
+        "parse_document: %d chunks extracted from %s",
+        len(parsed_chunks),
+        source_file,
+    )
     return parsed_chunks

@@ -57,8 +57,8 @@ def load_conversation_messages(session_id: str) -> bool:
     Call GET /api/v1/conversations/{session_id}/messages and populate
     st.session_state.messages with the full message history.
 
-    Normalises API response to {role, content, timestamp} format
-    that render_message() expects.
+    Normalises API response to {role, content, timestamp, image_paths}
+    format that render_message() expects.
 
     On success: populates messages, returns True.
     On failure: sets error banner, stays on list view, returns False.
@@ -75,9 +75,10 @@ def load_conversation_messages(session_id: str) -> bool:
         raw_messages = response.json()
         st.session_state.messages = [
             {
-                "role": msg["role"],
-                "content": msg["content"],
-                "timestamp": _format_ts(msg.get("created_at", "")),
+                "role":        msg["role"],
+                "content":     msg["content"],
+                "timestamp":   _format_ts(msg.get("created_at", "")),
+                "image_paths": msg.get("image_paths") or [],
             }
             for msg in raw_messages
         ]
@@ -89,46 +90,54 @@ def load_conversation_messages(session_id: str) -> bool:
         return False
 
 
-def send_chat_message(user_input: str) -> str | None:
+def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
     """
     POST the user message to FastAPI POST /api/v1/chat.
 
     Passes session_id so the backend can persist the message to the
     correct conversation via get_or_create_conversation().
 
-    On success: returns the assistant reply string.
-    On failure: sets st.session_state.error, returns None.
+    On success: returns (reply_text, image_paths) where image_paths is a
+    list of file-system paths the Streamlit frontend renders with st.image().
+    On failure: sets st.session_state.error, returns (None, []).
     Never raises — all exceptions caught internally.
 
     Args:
         user_input : The user's message text.
+
+    Returns:
+        Tuple of (reply str or None, list of image path strings).
     """
     try:
         response = requests.post(
             f"{API_BASE_URL}/api/v1/chat",
             json={
                 "session_id": st.session_state.session_id,
-                "message": user_input,
+                "message":    user_input,
             },
             timeout=60,
         )
         response.raise_for_status()
-        return response.json().get("reply", "No response received.")
+        data        = response.json()
+        reply       = data.get("reply", "No response received.")
+        image_paths = data.get("image_paths") or []
+        return reply, image_paths
+
     except requests.exceptions.ConnectionError:
         st.session_state.error = (
             "⚠ Service temporarily unavailable. Please try again later."
         )
-        return None
+        return None, []
     except requests.exceptions.Timeout:
         st.session_state.error = (
             "⚠ The request timed out. Please try again."
         )
-        return None
+        return None, []
     except Exception:
         st.session_state.error = (
             "⚠ Service temporarily unavailable. Please try again later."
         )
-        return None
+        return None, []
 
 
 def delete_conversation(session_id: str) -> bool:

@@ -5,7 +5,8 @@ LangGraph node implementations for the Credit Card Spend Summarizer.
 
 Graph flow:
     history_loader → router → kb_search   → response → END
-                           └→ sql_search  ↗
+                           ├→ sql_search  ↗
+                           └→ general     → END  (bypasses response_node)
 """
 
 import datetime
@@ -18,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from src.core.settings import get_settings
 from src.agents.prompts import (
     ROUTER_PROMPT_TEMPLATE,
+    GENERAL_PROMPT_TEMPLATE,
     NL2SQL_PROMPT_TEMPLATE,
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
@@ -70,7 +72,7 @@ def _format_history(history: list) -> str:
     if not history:
         return ""
     return "\n".join(
-        f"{m.get('role','user').capitalize()}: {m.get('content','')}"
+        f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
         for m in history
     )
 
@@ -94,10 +96,47 @@ def _enrich_query(query: str, history: list) -> str:
     return f"[Conversation so far]\n{history_text}\n\n[New question]\n{query}"
 
 
+def _extract_image_paths(chunks: list) -> list[str]:
+    """Collect image_path values from retrieved chunks that are image-type.
 
+    These paths are passed back to the Streamlit frontend so it can render
+    the images inline alongside the text answer.
 
+    Args:
+        chunks: Raw chunk objects or dicts returned by retrieve().
 
+    Returns:
+        Deduplicated list of file-system paths (strings). Empty list if none.
+    """
+    seen: set[str] = set()
+    paths: list[str] = []
 
+    for chunk in chunks:
+        # Support both object-style and dict-style chunks
+        content_type = (
+            getattr(chunk, "content_type", None)
+            or (chunk.get("content_type") if isinstance(chunk, dict) else None)
+        )
+        if content_type != "image":
+            continue
+
+        # image_path lives inside the metadata dict
+        metadata = (
+            getattr(chunk, "metadata", None)
+            or (chunk.get("metadata") if isinstance(chunk, dict) else None)
+            or {}
+        )
+        path = (
+            metadata.get("image_path")
+            if isinstance(metadata, dict)
+            else getattr(metadata, "image_path", None)
+        )
+
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    return paths
 
 
 def _persist_turn(state: AgentState, assistant_reply: str) -> None:
@@ -112,7 +151,6 @@ def _persist_turn(state: AgentState, assistant_reply: str) -> None:
         print(f"[_persist_turn] failed: {e}")
 
 
-
 # ─────────────────────────────────────────────
 # Node 0: History Loader
 # ─────────────────────────────────────────────
@@ -122,9 +160,9 @@ def history_loader_node(state: AgentState) -> AgentState:
     if not session_id:
         return {**state, "conversation_history": []}
     try:
-        conv_id = get_or_create_conversation(session_id)
+        conv_id  = get_or_create_conversation(session_id)
         messages = get_conversation_messages(conv_id)
-        history = messages[-6:] if messages else []
+        history  = messages[-6:] if messages else []
         return {**state, "conversation_history": history}
     except Exception as e:
         print(f"[history_loader_node] failed: {e}")
@@ -136,6 +174,12 @@ def history_loader_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────
 
 def router_node(state: AgentState) -> AgentState:
+    """Classify the query into knowledge_base | sql_query | general.
+
+    "general" catches greetings, capability questions, and anything
+    unrelated to NorthStar credit card data or documents — so those
+    queries never incorrectly hit the KB or SQL paths.
+    """
     try:
         history  = state.get("conversation_history") or []
         enriched = _enrich_query(state["query"], history)
@@ -146,15 +190,19 @@ def router_node(state: AgentState) -> AgentState:
             route = "sql_query"
         elif "knowledge_base" in route:
             route = "knowledge_base"
+        elif "general" in route:
+            route = "general"
         else:
-            print(f"[router_node] unexpected route '{route}', defaulting to knowledge_base")
-            route = "knowledge_base"
+            # Unknown output → safe fallback to general so we never
+            # hallucinate a KB answer for an unrelated question
+            print(f"[router_node] unexpected route '{route}', defaulting to general")
+            route = "general"
 
         print(f"[router_node] route='{route}'")
         return {**state, "route": route}
     except Exception as e:
         print(f"[router_node] failed: {e}")
-        return {**state, "route": "knowledge_base"}
+        return {**state, "route": "general"}
 
 
 # ─────────────────────────────────────────────
@@ -179,35 +227,83 @@ def sql_search_node(state: AgentState) -> AgentState:
     history  = state.get("conversation_history") or []
     enriched = _enrich_query(state["query"], history)
 
-    # ── Generic NL2SQL path ─────────────────────────────
     try:
-        # LLM generates SQL dynamically for any query
         result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched})
-        sql = result.content.strip()
-        # Remove any markdown fences
-        sql = re.sub(r'^```(?:sql)?\s*', '', sql)
-        sql = re.sub(r'\s*```$', '', sql).strip()
+        sql    = result.content.strip()
+        # Strip any markdown fences the LLM may have added
+        sql    = re.sub(r'^```(?:sql)?\s*', '', sql)
+        sql    = re.sub(r'\s*```$',         '', sql).strip()
         print(f"[sql_search_node] generated SQL: {sql[:120]}")
 
-        # Execute SQL
         rows = execute_sql(sql)
 
         return {**state,
-                "sql_executed": sql,
-                "sql_results": rows,
+                "sql_executed":  sql,
+                "sql_results":   rows,
                 "spend_context": None,
                 "sql_queries_run": [sql]}
 
     except Exception as e:
         print(f"[sql_search_node] NL2SQL failed: {e}")
         return {**state,
-                "sql_executed": "",
-                "sql_results": [],
+                "sql_executed":  "",
+                "sql_results":   [],
                 "spend_context": None,
                 "sql_queries_run": []}
 
+
 # ─────────────────────────────────────────────
-# Node 4: Response
+# Node 4: General (catch-all)
+# ─────────────────────────────────────────────
+
+def general_node(state: AgentState) -> AgentState:
+    """Handle queries unrelated to credit card data or policy documents.
+
+    Covers greetings ("hi", "who are you"), capability questions
+    ("what can you do?"), and off-topic requests ("write a Python script").
+
+    The node builds an AgentResponse directly and sets it on state —
+    it does NOT go through response_node, so the graph routes it straight
+    to END after this node.
+    """
+    try:
+        history_text = _format_history(state.get("conversation_history") or [])
+        result = (GENERAL_PROMPT_TEMPLATE | _get_llm()).invoke({
+            "query":   state["query"],
+            "history": history_text,
+        })
+        answer = result.content.strip()
+
+        response = AgentResponse(
+            query=state["query"],
+            answer=answer,
+            data_sources=[],
+            page_no="N/A",
+            document_name="N/A",
+            sql_query_executed=None,
+            route_taken="general",
+            image_paths=None,
+        )
+        _persist_turn(state, answer)
+        print("[general_node] general answer generated")
+        return {**state, "response": response}
+
+    except Exception as e:
+        print(f"[general_node] failed: {e}")
+        return {**state, "response": AgentResponse(
+            query=state["query"],
+            answer="Sorry, I encountered an error. Please try again.",
+            data_sources=[],
+            page_no="N/A",
+            document_name="N/A",
+            sql_query_executed=None,
+            route_taken="general",
+            image_paths=None,
+        )}
+
+
+# ─────────────────────────────────────────────
+# Node 5: Response
 # ─────────────────────────────────────────────
 
 def response_node(state: AgentState) -> AgentState:
@@ -221,7 +317,9 @@ def response_node(state: AgentState) -> AgentState:
             chunks  = state.get("chunks") or []
             context = format_context(chunks)
             result  = (KB_GENERATION_PROMPT_TEMPLATE | llm).invoke({
-                "query": state["query"], "context": context, "history": history_text,
+                "query":   state["query"],
+                "context": context,
+                "history": history_text,
             })
             answer = result.content.strip()
 
@@ -237,15 +335,22 @@ def response_node(state: AgentState) -> AgentState:
                     page_numbers.append(str(page))
                 data_sources.append({"document": doc, "page": page, "section": sec, "score": scr})
 
+            # Collect image paths from retrieved chunks so Streamlit can
+            # render them inline below the text answer.
+            image_paths = _extract_image_paths(chunks) or None
+
             response = AgentResponse(
-                query=state["query"], answer=answer,
+                query=state["query"],
+                answer=answer,
                 data_sources=data_sources,
                 page_no=", ".join(page_numbers) if page_numbers else "N/A",
                 document_name=", ".join(doc_names) if doc_names else "N/A",
-                sql_query_executed=None, route_taken="knowledge_base",
+                sql_query_executed=None,
+                route_taken="knowledge_base",
+                image_paths=image_paths,
             )
             _persist_turn(state, answer)
-            print("[response_node] KB answer generated")
+            print(f"[response_node] KB answer generated — {len(image_paths or [])} image(s)")
             return {**state, "response": response}
 
         # ── Spend-summary path ────────────────────────────────────────────
@@ -253,11 +358,12 @@ def response_node(state: AgentState) -> AgentState:
         if spend_context and "error" not in spend_context:
             context_json = json.dumps(spend_context, indent=2, default=str)
             result = (SPEND_SUMMARY_PROMPT_TEMPLATE | llm).invoke({
-                "context_json": context_json, "history": history_text,
+                "context_json": context_json,
+                "history":      history_text,
             })
             raw = result.content.strip()
             raw = re.sub(r'^```(?:json)?\s*', '', raw)
-            raw = re.sub(r'\s*```$', '', raw).strip()
+            raw = re.sub(r'\s*```$',          '', raw).strip()
 
             try:
                 llm_out      = json.loads(raw)
@@ -302,7 +408,10 @@ def response_node(state: AgentState) -> AgentState:
 
             merchant_rows = spend_context.get("top_merchants") or []
             top_merchants = [
-                TopMerchant(merchant_name=r.get("merchant_name", "Unknown"), amount=float(r.get("total") or 0))
+                TopMerchant(
+                    merchant_name=r.get("merchant_name", "Unknown"),
+                    amount=float(r.get("total") or 0),
+                )
                 for r in merchant_rows
             ]
 
@@ -321,14 +430,26 @@ def response_node(state: AgentState) -> AgentState:
                     mom_change_pct = round((curr - prev) / prev * 100, 1)
 
             response = SpendSummaryResponse(
-                card_id=card_id, customer_name=customer_name,
-                billing_month=billing_month_label, total_spend=total_spend,
-                total_transactions=total_transactions, category_breakdown=category_breakdown,
+                card_id=card_id,
+                customer_name=customer_name,
+                billing_month=billing_month_label,
+                total_spend=total_spend,
+                total_transactions=total_transactions,
+                category_breakdown=category_breakdown,
                 top_merchants=top_merchants,
-                international_spend=InternationalSpend(total_amount=intl_total, transaction_count=len(intl_rows)),
-                reward_points_earned=RewardPointsSummary(points_earned=points_earned, inr_value=round(points_earned * 0.25, 2)),
-                mom_change_pct=mom_change_pct, summary_text=summary_text, tip=tip,
-                route_taken="sql_query", sql_queries_executed=state.get("sql_queries_run"),
+                international_spend=InternationalSpend(
+                    total_amount=intl_total,
+                    transaction_count=len(intl_rows),
+                ),
+                reward_points_earned=RewardPointsSummary(
+                    points_earned=points_earned,
+                    inr_value=round(points_earned * 0.25, 2),
+                ),
+                mom_change_pct=mom_change_pct,
+                summary_text=summary_text,
+                tip=tip,
+                route_taken="sql_query",
+                sql_queries_executed=state.get("sql_queries_run"),
             )
             _persist_turn(state, summary_text)
             print("[response_node] spend-summary assembled")
@@ -338,16 +459,21 @@ def response_node(state: AgentState) -> AgentState:
         sql_executed = state.get("sql_executed", "")
         sql_results  = state.get("sql_results") or []
         result = (SQL_ANSWER_PROMPT_TEMPLATE | llm).invoke({
-            "query": state["query"],
+            "query":        state["query"],
             "sql_executed": sql_executed,
-            "sql_results": json.dumps(sql_results, indent=2, default=str),
-            "history": history_text,
+            "sql_results":  json.dumps(sql_results, indent=2, default=str),
+            "history":      history_text,
         })
         answer = result.content.strip()
         response = AgentResponse(
-            query=state["query"], answer=answer, data_sources=[],
-            page_no="N/A", document_name="credit_card_account_data",
-            sql_query_executed=sql_executed, route_taken="sql_query",
+            query=state["query"],
+            answer=answer,
+            data_sources=[],
+            page_no="N/A",
+            document_name="credit_card_account_data",
+            sql_query_executed=sql_executed,
+            route_taken="sql_query",
+            image_paths=None,
         )
         _persist_turn(state, answer)
         print("[response_node] generic SQL answer generated")
@@ -358,6 +484,10 @@ def response_node(state: AgentState) -> AgentState:
         return {**state, "response": AgentResponse(
             query=state["query"],
             answer="Sorry, I encountered an error generating a response. Please try again.",
-            data_sources=[], page_no="N/A", document_name="N/A",
-            sql_query_executed=None, route_taken=state.get("route", "unknown"),
+            data_sources=[],
+            page_no="N/A",
+            document_name="N/A",
+            sql_query_executed=None,
+            route_taken=state.get("route", "unknown"),
+            image_paths=None,
         )}

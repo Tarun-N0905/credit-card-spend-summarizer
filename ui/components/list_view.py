@@ -8,6 +8,7 @@ Imported by:
   - ui/app.py
 """
 
+import html
 from datetime import datetime
 
 import streamlit as st
@@ -95,6 +96,8 @@ def render_conversation_card(conv: dict, index: int) -> None:
     Render a single past conversation as a styled card with an Open button.
 
     Shows the first message preview text and the conversation date.
+    Preview text is HTML-escaped so special characters in message content
+    never break the card layout.
     Clicking Open loads the conversation messages and switches to chat view.
     If loading fails, error banner shows and list view stays visible.
 
@@ -102,12 +105,12 @@ def render_conversation_card(conv: dict, index: int) -> None:
         conv  : Dict with keys: session_id, preview, created_at
         index : Unique index to key the Streamlit button per card
     """
-    preview = conv.get("preview", "No messages yet")
-    date_label = _format_date(conv.get("created_at", ""))
+    safe_preview = html.escape(conv.get("preview", "No messages yet"))
+    date_label   = _format_date(conv.get("created_at", ""))
 
     st.markdown(f"""
     <div class="cs-card">
-        <div class="cs-card-preview">{preview}</div>
+        <div class="cs-card-preview">{safe_preview}</div>
         <div class="cs-card-date">{date_label}</div>
     </div>
     """, unsafe_allow_html=True)

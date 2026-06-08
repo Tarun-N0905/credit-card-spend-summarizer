@@ -5,6 +5,7 @@ All LangChain prompt templates for the credit card agent.
 
 Templates and their {variables}:
     ROUTER_PROMPT_TEMPLATE          {query}
+    GENERAL_PROMPT_TEMPLATE         {query}, {history}
     SPEND_SUMMARY_PROMPT_TEMPLATE   {context_json}, {history}
     NL2SQL_PROMPT_TEMPLATE          {query}
     SQL_ANSWER_PROMPT_TEMPLATE      {query}, {sql_executed}, {sql_results}, {history}
@@ -18,7 +19,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 ROUTER_SYSTEM_PROMPT = """You are a query router for a credit card RAG agent system.
 
-Classify the user's query into EXACTLY one of two routes:
+Classify the user's query into EXACTLY one of three routes:
 
 "knowledge_base"
   → Query asks about credit card terms, conditions, benefits, rewards policies,
@@ -35,12 +36,45 @@ Classify the user's query into EXACTLY one of two routes:
     "How many reward points do I have?", "Compare my spending this month vs last month",
     "Am I on track for the fee waiver?"
 
-Reply with ONLY the route label — either "knowledge_base" or "sql_query".
+"general"
+  → Everything else — greetings, questions about what the assistant can do,
+    general knowledge questions, coding requests, or anything unrelated to
+    NorthStar Bank credit cards or account data.
+  → Examples: "Who are you?", "What can you help me with?",
+    "Write a Python script", "What is the capital of France?"
+
+Reply with ONLY the route label — one of "knowledge_base", "sql_query", or "general".
 No explanation, no punctuation, no extra words. Just the label."""
 
 ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
     ("system", ROUTER_SYSTEM_PROMPT),
     ("human", "Query: {query}"),
+])
+
+
+# ── General (catch-all) ────────────────────────────────────────────────────────
+
+GENERAL_SYSTEM_PROMPT = """You are a helpful assistant for NorthStar Bank's credit card platform.
+
+The user has asked something outside the scope of credit card data or policy documents.
+
+Guidelines:
+- For greetings or "what can you do" questions: briefly introduce yourself and list
+  what you can help with (credit card terms, spend summaries, transactions, rewards).
+- For general knowledge or coding questions: answer helpfully and concisely,
+  then gently note that you are primarily a credit card assistant.
+- Never pretend to have access to data you don't have.
+- Keep responses short and friendly."""
+
+GENERAL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("system", GENERAL_SYSTEM_PROMPT),
+    (
+        "human",
+        """Recent conversation history (may be empty):
+{history}
+
+User message: {query}""",
+    ),
 ])
 
 
@@ -275,6 +309,9 @@ RULES:
 10. If conversation history is provided, use it to resolve follow-up questions and references.
 
 11. Keep answers concise, customer-friendly, and directly relevant to the question.
+
+12. If the context includes image descriptions, reference them naturally in your answer
+    (e.g., "As shown in the fee schedule diagram..."). Do not mention file paths.
 """
 
 KB_GENERATION_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([

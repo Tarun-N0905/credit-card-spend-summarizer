@@ -75,11 +75,9 @@ class SpendSummaryResponse(BaseModel):
     )
 
 
-# Keep AgentResponse for the knowledge_base route (policy / terms questions)
 class AgentResponse(BaseModel):
     """
-    Generic response used for knowledge_base (policy / terms) queries.
-    Not used for the spend summarizer path.
+    Generic response used for knowledge_base, general, and sql_query routes.
     """
     query: str
     answer: str
@@ -88,3 +86,10 @@ class AgentResponse(BaseModel):
     document_name: str
     sql_query_executed: Optional[str] = None
     route_taken: str
+
+    # Populated only on knowledge_base route when retrieved chunks contain images.
+    # Each entry is a file-system path that Streamlit can read with st.image().
+    image_paths: Optional[List[str]] = Field(
+        default=None,
+        description="Absolute paths to images referenced in the answer (kb route only)"
+    )

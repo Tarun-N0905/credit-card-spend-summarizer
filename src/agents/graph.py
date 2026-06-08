@@ -5,7 +5,8 @@ LangGraph state machine for the Credit Card Spend Summarizer.
 
 Flow:
     history_loader → router → kb_search   → response → END
-                           └→ sql_search  ↗
+                           ├→ sql_search  ↗
+                           └→ general              → END
 """
 
 from typing import Literal
@@ -17,6 +18,7 @@ from src.agents.nodes import (
     router_node,
     kb_search_node,
     sql_search_node,
+    general_node,
     response_node,
 )
 
@@ -28,6 +30,7 @@ def build_agent_graph():
     graph.add_node("router",         router_node)
     graph.add_node("kb_search",      kb_search_node)
     graph.add_node("sql_search",     sql_search_node)
+    graph.add_node("general",        general_node)
     graph.add_node("response",       response_node)
 
     graph.set_entry_point("history_loader")
@@ -35,13 +38,20 @@ def build_agent_graph():
 
     graph.add_conditional_edges(
         "router",
-        lambda state: state.get("route", "knowledge_base"),
-        {"knowledge_base": "kb_search", "sql_query": "sql_search"},
+        lambda state: state.get("route", "general"),
+        {
+            "knowledge_base": "kb_search",
+            "sql_query":      "sql_search",
+            "general":        "general",
+        },
     )
 
     graph.add_edge("kb_search",  "response")
     graph.add_edge("sql_search", "response")
     graph.add_edge("response",   END)
+
+    # general_node sets the response directly and exits — no response_node needed
+    graph.add_edge("general", END)
 
     compiled = graph.compile()
     print("[build_agent_graph] compiled successfully")
@@ -54,16 +64,16 @@ credit_card_agent = build_agent_graph()
 
 def run_credit_card_agent(query: str, session_id: str = "") -> dict:
     initial_state: AgentState = {
-        "query": query,
-        "session_id": session_id,
+        "query":                query,
+        "session_id":           session_id,
         "conversation_history": None,
-        "route": "",
-        "chunks": [],
-        "sql_executed": None,
-        "sql_results": None,
-        "spend_context": None,
-        "sql_queries_run": [],
-        "response": None,
+        "route":                "",
+        "chunks":               [],
+        "sql_executed":         None,
+        "sql_results":          None,
+        "spend_context":        None,
+        "sql_queries_run":      [],
+        "response":             None,
     }
 
     try:
@@ -76,7 +86,7 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         if hasattr(response, "model_dump"):
             response = response.model_dump()
 
-        print(f"[run_credit_card_agent] route={response.get('route_taken','?')}")
+        print(f"[run_credit_card_agent] route={response.get('route_taken', '?')}")
         return response
 
     except Exception as e:
@@ -88,4 +98,5 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
             "page_no":       "N/A",
             "document_name": "error",
             "route_taken":   "error",
+            "image_paths":   None,
         }

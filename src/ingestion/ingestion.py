@@ -1,8 +1,24 @@
+"""
+src/ingestion/ingestion.py
+
+Section-aware chunking for multimodal RAG.
+
+Design goals
+------------
+- Preserve semantic structure.
+- Keep tables atomic.
+- Keep images atomic.
+- Chunk text by paragraphs, not raw characters.
+- Maintain section context by repeating headings.
+- Use 500-char chunks with 70-char overlap.
+"""
+
 import logging
 import pathlib
+import sys
 
 from dotenv import load_dotenv
-import sys
+
 from src.core.db import store_chunks, upsert_document
 from src.ingestion.docling_parser import parse_document
 from src.ingestion.deduplication import deduplicate_chunks
@@ -11,24 +27,30 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-# Chunking Configuration
-_TEXT_CHUNK_SIZE = 500
-_TEXT_CHUNK_OVERLAP = 50
+TEXT_CHUNK_SIZE = 500
+TEXT_CHUNK_OVERLAP = 70
 
 
-def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+def _split_text_with_overlap(
+    text: str,
+    chunk_size: int = TEXT_CHUNK_SIZE,
+    overlap: int = TEXT_CHUNK_OVERLAP,
+) -> list[str]:
     """
-    Split text into overlapping character windows.
+    Sliding window splitter used only inside a section after
+    paragraph aggregation.
     """
 
-    chunks: list[str] = []
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
 
     start = 0
     step = chunk_size - overlap
 
     while start < len(text):
-        chunks.append(text[start:start + chunk_size])
+        chunks.append(text[start : start + chunk_size])
         start += step
 
     return chunks
@@ -36,137 +58,115 @@ def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 def build_section_documents(parsed_elements: list[dict]) -> list[dict]:
     """
-    Merge section headings with their associated content.
+    Build semantically meaningful chunks.
 
-    Example:
-
-        Rewards Program
-        ├─ Paragraph A
-        ├─ Paragraph B
-        └─ Paragraph C
-
-    becomes
-
-        Rewards Program
-
-        Paragraph A
-
-        Paragraph B
-
-        Paragraph C
-
-    Tables and images remain atomic elements.
+    Assumptions:
+    - section headers are NOT emitted as standalone chunks by docling_parser.
+    - every element already carries metadata["section"].
+    - tables and images remain atomic.
     """
 
-    structured_elements: list[dict] = []
+    chunks: list[dict] = []
 
-    current_section_title: str | None = None
-    current_text_parts: list[str] = []
-    current_metadata: dict | None = None
+    current_section = None
+    paragraph_buffer: list[str] = []
+    current_metadata = None
+
+    def flush_text_buffer():
+        nonlocal paragraph_buffer
+        nonlocal current_metadata
+        nonlocal current_section
+
+        if not paragraph_buffer:
+            return
+
+        combined_text = "\n\n".join(paragraph_buffer)
+
+        sub_chunks = _split_text_with_overlap(
+            combined_text,
+            TEXT_CHUNK_SIZE,
+            TEXT_CHUNK_OVERLAP,
+        )
+
+        for sub_chunk in sub_chunks:
+
+            if current_section:
+                content = f"{current_section}\n\n{sub_chunk}"
+            else:
+                content = sub_chunk
+
+            chunks.append(
+                {
+                    "content": content,
+                    "content_type": "text",
+                    "metadata": current_metadata,
+                }
+            )
+
+        paragraph_buffer = []
 
     for elem in parsed_elements:
 
-        content_type = elem["content_type"]
+        content = elem["content"].strip()
 
-        
-        # Tables and images remain atomic
-        
-        if content_type in ("table", "image"):
-
-            if current_text_parts:
-                structured_elements.append(
-                    {
-                        "content": "\n\n".join(current_text_parts),
-                        "content_type": "text",
-                        "metadata": current_metadata,
-                    }
-                )
-
-                current_text_parts = []
-                current_section_title = None
-                current_metadata = None
-
-            structured_elements.append(elem)
+        if not content:
             continue
 
         metadata = elem["metadata"]
+        content_type = elem["content_type"]
 
-        element_type = (
-            metadata.get("element_type", "")
-            .lower()
-        )
+        section_name = metadata.get("section")
 
-        is_heading = (
-            "section_header" in element_type
-            or element_type == "title"
-        )
+        # Section changed
+        if section_name != current_section:
+            flush_text_buffer()
+            current_section = section_name
 
-        
-        # New section starts
-        if is_heading:
+        # Tables/images remain atomic
+        if content_type in ("table", "image"):
 
-            if current_text_parts:
-                structured_elements.append(
-                    {
-                        "content": "\n\n".join(current_text_parts),
-                        "content_type": "text",
-                        "metadata": current_metadata,
-                    }
-                )
+            flush_text_buffer()
 
-            current_section_title = elem["content"]
-            current_metadata = metadata
+            chunks.append(
+                {
+                    "content": content,
+                    "content_type": content_type,
+                    "metadata": metadata,
+                }
+            )
 
-            current_text_parts = [current_section_title]
+            continue
 
-        
-        # Regular text content
-        else:
+        # Normal text
+        current_metadata = metadata
+        paragraph_buffer.append(content)
 
-            if current_section_title is None:
+    flush_text_buffer()
 
-                current_section_title = "Document Content"
-                current_metadata = metadata
-
-                current_text_parts = [current_section_title]
-
-            current_text_parts.append(elem["content"])
-
-    
-    # Flush final section
-    
-    if current_text_parts:
-        structured_elements.append(
-            {
-                "content": "\n\n".join(current_text_parts),
-                "content_type": "text",
-                "metadata": current_metadata,
-            }
-        )
-
-    return structured_elements
+    return chunks
 
 
-def run_ingestion(file_path: str) -> dict:
+def run_ingestion(
+    file_path: str,
+    original_filename: str,
+) -> dict:
     """
     Full ingestion pipeline.
 
-    Steps:
-        1. Register document
-        2. Parse PDF with Docling
-        3. Merge headings + section content
-        4. Split long text sections (500 chars, 50 overlap)
-        5. Deduplicate
-        6. Store embeddings + chunks
+    Steps
+    -----
+    1. Register document
+    2. Parse PDF with Docling
+    3. Build section-aware chunks
+    4. Deduplicate
+    5. Store embeddings + chunks
     """
 
     resolved = pathlib.Path(file_path).resolve()
 
-    
-    # Step 1: Register document
-    
+    # Register document
     doc_id = upsert_document(
-        resolved.name,
+        original_filename,
         str(resolved),
     )
 
@@ -176,9 +176,7 @@ def run_ingestion(file_path: str) -> dict:
         file_path,
     )
 
-    
-    # Step 2: Parse document
-    
+    # Parse
     logger.info("Parsing document: %s", file_path)
 
     parsed_elements = parse_document(file_path)
@@ -188,54 +186,15 @@ def run_ingestion(file_path: str) -> dict:
         len(parsed_elements),
     )
 
-    
-    # Step 3: Merge headings with content
-    
-    structured_elements = build_section_documents(parsed_elements)
+    # Build chunks
+    chunks = build_section_documents(parsed_elements)
 
     logger.info(
-        "%d structured elements after section merge",
-        len(structured_elements),
-    )
-
-    
-    # Step 4: Chunk text
-    
-    chunks: list[dict] = []
-
-    for elem in structured_elements:
-
-        if (
-            elem["content_type"] == "text"
-            and len(elem["content"]) > _TEXT_CHUNK_SIZE
-        ):
-
-            sub_chunks = _split_text(
-                elem["content"],
-                _TEXT_CHUNK_SIZE,
-                _TEXT_CHUNK_OVERLAP,
-            )
-
-            for sub in sub_chunks:
-
-                chunks.append(
-                    {
-                        "content": sub,
-                        "content_type": "text",
-                        "metadata": elem["metadata"],
-                    }
-                )
-
-        else:
-            chunks.append(elem)
-
-    logger.info(
-        "%d chunks after text splitting",
+        "%d chunks after section-aware chunking",
         len(chunks),
     )
 
-    
-    # Step 5: Deduplication
+    # Deduplicate
     unique_chunks, skipped = deduplicate_chunks(chunks)
 
     logger.info(
@@ -244,8 +203,7 @@ def run_ingestion(file_path: str) -> dict:
         skipped,
     )
 
-    
-    # Step 6: Store chunks 
+    # Store
     count = store_chunks(
         unique_chunks,
         doc_id,
@@ -264,8 +222,6 @@ def run_ingestion(file_path: str) -> dict:
     }
 
 
-
-# Direct execution
 if __name__ == "__main__":
 
     logging.basicConfig(
@@ -276,15 +232,14 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2:
         pdf_path = pathlib.Path(sys.argv[1])
     else:
-        pdf_path = pathlib.Path(
-            "data/documents/KB_Credit_Card_Spend_Summarizer.pdf"
-        )
+        pdf_path = pathlib.Path("data/documents/KB_Credit_Card_Spend_Summarizer.pdf")
 
     if not pdf_path.exists():
-        raise FileNotFoundError(
-            f"PDF not found at: {pdf_path.resolve()}"
-        )
+        raise FileNotFoundError(f"PDF not found at: {pdf_path.resolve()}")
 
-    result = run_ingestion(str(pdf_path))
+    result = run_ingestion(
+        str(pdf_path),
+        pdf_path.name,
+    )
 
     print(f"\nIngestion complete: {result}")
