@@ -15,25 +15,19 @@ from state import clear_error
 def render_header() -> None:
     """
     Render the top header bar. Always visible in both list and chat views.
-
-    In list view: subtitle shows "conversations"
-    In chat view: subtitle shows first 8 chars of the active session UUID
+    Title is centered; no session sub shown.
     """
-    if st.session_state.view == "list":
-        sub = "conversations"
-    else:
-        sid = st.session_state.session_id or ""
-        sub = sid[:8] + "…" if sid else ""
-
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="cs-header">
         <div class="cs-header-icon">💳</div>
         <div>
             <div class="cs-header-title">Credit Spend Summarizer</div>
-            <div class="cs-header-sub">{sub}</div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_error_banner() -> None:

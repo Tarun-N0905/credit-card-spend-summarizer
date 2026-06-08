@@ -4,24 +4,26 @@ src/agents/nodes.py
 LangGraph node implementations for the Credit Card Spend Summarizer.
 
 Graph flow:
-    history_loader → router → kb_agent → kb_tool_node → response → END
-                           ├→ sql_search               ↗
-                           ├→ both                    ↗
-                           └→ general                      → END
+    history_loader → router → kb_agent  → kb_tool_node  → response → END
+                           ├→ sql_agent → sql_tool_node ↗
+                           ├→ both                      ↗
+                           └→ general                        → END
 
 Key design decisions
 ────────────────────
-1.  KB retrieval is now fully LLM-driven.
+1.  KB retrieval is fully LLM-driven.
     A bound-tool LLM (kb_agent_llm) decides per-query whether to call
     `hybrid_search_tool` (hybrid: vector + FTS + rerank) or
     `vector_search_tool` (pure cosine similarity).  No keyword matching.
 
-2.  SQL is 100 % NL2SQL — no hardcoded queries, no static spend-summary
-    pipeline.  Every SQL path generates SQL via NL2SQL_PROMPT_TEMPLATE,
-    executes it, and hands the raw results to the response LLM.
+2.  SQL is fully LLM-driven via tools.
+    A bound-tool LLM (sql_agent_llm) decides whether to call
+    `nl2sql_execute` (single query) or `nl2sql_execute_multi` (two queries
+    for comparisons / multi-dataset questions).  No keyword matching, no
+    hardcoded query pipelines.
 
-3.  Tool execution uses LangGraph's ToolNode so tool-call ↔ tool-result
-    message pairs are handled correctly by the framework.
+3.  Both routes use LangGraph ToolNode so tool-call ↔ tool-result message
+    pairs are handled correctly by the framework.
 """
 
 import json
@@ -37,6 +39,7 @@ from src.agents.prompts import (
     ROUTER_PROMPT_TEMPLATE,
     GENERAL_PROMPT_TEMPLATE,
     NL2SQL_PROMPT_TEMPLATE,
+    SQL_AGENT_PROMPT_TEMPLATE,
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
 )
@@ -51,7 +54,7 @@ from src.core.db import (
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Retrieval tools — LLM picks one per KB query
+# KB Retrieval tools — LLM picks one per KB query
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -98,6 +101,85 @@ KB_TOOLS = [hybrid_search_tool, vector_search_tool]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SQL tools — LLM picks one per SQL query
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
+    """
+    Generate SQL from a natural-language query and execute it.
+    Returns (sql_string, rows_list).  Never raises — returns ("", []) on error.
+    """
+    try:
+        result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched_query})
+        sql = result.content.strip()
+        sql = re.sub(r"^```(?:sql)?\s*", "", sql)
+        sql = re.sub(r"\s*```$", "", sql).strip()
+        print(f"[_run_nl2sql] generated SQL: {sql[:160]}")
+        rows = execute_sql(sql)
+        print(f"[_run_nl2sql] {len(rows)} row(s) returned")
+        return sql, rows
+    except Exception as e:
+        print(f"[_run_nl2sql] failed: {e}")
+        return "", []
+
+
+@tool
+def nl2sql_execute(question: str) -> str:
+    """
+    Convert a natural-language question about credit card account data into SQL,
+    execute it against the database, and return the results as a JSON string.
+
+    Use this for any question that requires a SINGLE query — transactions,
+    balances, reward points, billing statement summaries, fee-waiver checks,
+    top merchants, category spend, international transactions, etc.
+
+    Examples:
+    - "Show transactions for CC-881001 in March 2026"
+    - "What is the current reward balance on CC-881001?"
+    - "How much did I spend on food last month?"
+    - "Am I on track for the annual fee waiver?"
+    """
+    sql, rows = _run_nl2sql(question)
+    return json.dumps({"sql": sql, "results": rows}, default=str)
+
+
+@tool
+def nl2sql_execute_multi(question_a: str, question_b: str) -> str:
+    """
+    Run TWO independent natural-language questions as separate SQL queries and
+    return both result sets as a combined JSON string.
+
+    Use this when the user's question clearly requires TWO logically distinct
+    data sets — for example:
+    - Month-over-month comparisons ("this month vs last month")
+    - Two different cards ("CC-001 vs CC-002")
+    - Transactions AND rewards together as separate aggregates
+    - Any "compare X and Y" question where X and Y need separate queries
+
+    Pass each sub-question as question_a and question_b independently.
+    Do NOT use this for questions that a single JOIN or CTE can answer.
+
+    Examples:
+    question_a = "Total spend on CC-881001 for March 2026"
+    question_b = "Total spend on CC-881001 for February 2026"
+    """
+    sql_a, rows_a = _run_nl2sql(question_a)
+    sql_b, rows_b = _run_nl2sql(question_b)
+    return json.dumps(
+        {
+            "query_a": {"sql": sql_a, "results": rows_a},
+            "query_b": {"sql": sql_b, "results": rows_b},
+        },
+        default=str,
+    )
+
+
+# Registry of SQL tools — passed to ToolNode (in graph.py) and bound to the SQL agent LLM
+SQL_TOOLS = [nl2sql_execute, nl2sql_execute_multi]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # State
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -134,6 +216,13 @@ def _get_kb_agent_llm() -> ChatOpenAI:
     s = get_settings()
     llm = ChatOpenAI(model=s.openai_chat_model, temperature=0, api_key=s.openai_api_key)
     return llm.bind_tools(KB_TOOLS)
+
+
+def _get_sql_agent_llm() -> ChatOpenAI:
+    """LLM bound with SQL tools so it can choose single vs multi query."""
+    s = get_settings()
+    llm = ChatOpenAI(model=s.openai_chat_model, temperature=0, api_key=s.openai_api_key)
+    return llm.bind_tools(SQL_TOOLS)
 
 
 def _format_history(history: list) -> str:
@@ -190,55 +279,59 @@ def _extract_image_paths(chunks: list) -> list[str]:
     return paths
 
 
-def _persist_turn(state: AgentState, assistant_reply: str) -> None:
-    session_id = state.get("session_id", "")
-    if not session_id:
-        return
-    try:
-        conv_id = get_or_create_conversation(session_id)
-        save_message(conv_id, role="user", content=state["query"])
-        save_message(conv_id, role="assistant", content=assistant_reply)
-    except Exception as e:
-        print(f"[_persist_turn] failed: {e}")
-
-
-def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
+def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
     """
-    Generate SQL from a natural-language query and execute it.
-    Returns (sql_string, rows_list).  Never raises — returns ("", []) on error.
+    Extract SQL and results from ToolMessage(s) written by sql_tool_node.
+
+    Handles both single-tool (nl2sql_execute) and multi-tool
+    (nl2sql_execute_multi) outputs.  Returns (sql_summary_str, merged_rows).
     """
-    try:
-        result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched_query})
-        sql = result.content.strip()
-        sql = re.sub(r"^```(?:sql)?\s*", "", sql)
-        sql = re.sub(r"\s*```$", "", sql).strip()
-        print(f"[_run_nl2sql] generated SQL: {sql[:160]}")
-        rows = execute_sql(sql)
-        print(f"[_run_nl2sql] {len(rows)} row(s) returned")
-        return sql, rows
-    except Exception as e:
-        print(f"[_run_nl2sql] failed: {e}")
+    tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+    if not tool_messages:
         return "", []
+
+    all_sqls: list[str] = []
+    all_rows: list[dict] = []
+
+    for tm in tool_messages:
+        try:
+            payload = json.loads(tm.content)
+        except Exception:
+            continue
+
+        if "sql" in payload:
+            # nl2sql_execute output: {"sql": "...", "results": [...]}
+            if payload.get("sql"):
+                all_sqls.append(payload["sql"])
+            all_rows.extend(payload.get("results") or [])
+
+        elif "query_a" in payload and "query_b" in payload:
+            # nl2sql_execute_multi output
+            for key in ("query_a", "query_b"):
+                part = payload[key]
+                if part.get("sql"):
+                    all_sqls.append(part["sql"])
+                all_rows.extend(part.get("results") or [])
+
+    sql_summary = "\n\n".join(all_sqls)
+    return sql_summary, all_rows
 
 
 def _run_kb_agent(query: str) -> tuple[str, list]:
     """
-    Let the LLM choose between hybrid_search_tool (hybrid) and
-    vector_search_tool (pure vector), call the retrieval function directly,
-    and return (formatted_context_string, raw_chunks_for_image_extraction).
-    Used by both_node. The knowledge_base route uses kb_agent_node + graph ToolNode instead.
+    Let the LLM choose between hybrid_search_tool and vector_search_tool,
+    call the retrieval function directly, and return
+    (formatted_context_string, raw_chunks_for_image_extraction).
 
-    Returns ("No relevant documents found.", []) on any failure.
+    Used by both_node. The knowledge_base route uses kb_agent_node +
+    graph ToolNode instead.
     """
     kb_llm = _get_kb_agent_llm()
-
-    # Ask the LLM which tool to call
     messages = [HumanMessage(content=query)]
     ai_msg: AIMessage = kb_llm.invoke(messages)
 
     tool_calls = getattr(ai_msg, "tool_calls", None) or []
     if not tool_calls:
-        # LLM answered without a tool call — fall back to hybrid
         print("[_run_kb_agent] LLM made no tool call; falling back to hybrid retrieval")
         chunks = hybrid_retrieve(query, top_k=5)
         return format_context(chunks), chunks
@@ -246,10 +339,6 @@ def _run_kb_agent(query: str) -> tuple[str, list]:
     tool_name = tool_calls[0].get("name", "")
     print(f"[_run_kb_agent] LLM selected tool: {tool_name!r}")
 
-    # Call the retrieval function directly — no ToolNode needed here.
-    # ToolNode is only used as a proper graph node (kb_tool_node in graph.py)
-    # for the knowledge_base route. The both_node path uses this helper
-    # directly and needs raw chunks, so we retrieve once and derive context.
     try:
         if tool_name == "vector_search_tool":
             raw_chunks = search_semantic(query, top_k=5, rerank=True)
@@ -336,8 +425,6 @@ def kb_agent_node(state: AgentState) -> AgentState:
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
-            # LLM answered without a tool call — fall back to hybrid and
-            # short-circuit: store kb_context so response_node can use it.
             print("[kb_agent_node] no tool call; falling back to hybrid retrieval")
             chunks = hybrid_retrieve(state["query"], top_k=5)
             return {
@@ -362,28 +449,67 @@ def kb_agent_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 3 — SQL Search  (pure NL2SQL — no hardcoded queries)
+# Node 3 — SQL Agent  (LLM picks single vs multi query via tool call)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def sql_search_node(state: AgentState) -> AgentState:
+def sql_agent_node(state: AgentState) -> AgentState:
     """
-    Convert the user query to SQL via the NL2SQL LLM chain, execute it,
-    and store the results.  A single NL2SQL call covers all question types
-    (transactions, balances, rewards, spend summaries, fee-waiver checks, etc.)
-    — there are no hardcoded SQL templates or static query pipelines.
+    Fire the tool-bound SQL agent LLM so it emits an AIMessage with tool_calls.
+    The LLM decides whether to call:
+      • nl2sql_execute       — single NL→SQL query
+      • nl2sql_execute_multi — two independent NL→SQL queries (comparisons)
+
+    No keyword matching, no hardcoded routing — the LLM owns the decision.
+
+    The actual tool execution happens in the next graph node (sql_tool_node,
+    a LangGraph ToolNode) which reads state["messages"] automatically.
+
+    Falls back to direct _run_nl2sql and short-circuits sql_executed /
+    sql_results if the LLM returns no tool call.
     """
-    history = state.get("conversation_history") or []
-    enriched = _enrich_query(state["query"], history)
+    try:
+        sql_llm = _get_sql_agent_llm()
+        history = state.get("conversation_history") or []
+        history_text = _format_history(history)
+        enriched = _enrich_query(state["query"], history)
 
-    sql, rows = _run_nl2sql(enriched)
+        human_msg = HumanMessage(
+            content=SQL_AGENT_PROMPT_TEMPLATE.format_messages(
+                query=enriched,
+                history=history_text,
+            )[
+                -1
+            ].content  # extract rendered human turn content
+        )
+        ai_msg: AIMessage = sql_llm.invoke([human_msg])
 
-    return {
-        **state,
-        "sql_executed": sql,
-        "sql_results": rows,
-        "sql_queries_run": [sql] if sql else [],
-    }
+        tool_calls = getattr(ai_msg, "tool_calls", None) or []
+        if not tool_calls:
+            # LLM answered without a tool call — fall back to direct NL2SQL
+            print("[sql_agent_node] no tool call; falling back to direct NL2SQL")
+            sql, rows = _run_nl2sql(enriched)
+            return {
+                **state,
+                "messages": [human_msg, ai_msg],
+                "sql_executed": sql,
+                "sql_results": rows,
+                "sql_queries_run": [sql] if sql else [],
+            }
+
+        tool_name = tool_calls[0].get("name", "")
+        print(f"[sql_agent_node] LLM selected tool: {tool_name!r}")
+        return {**state, "messages": [human_msg, ai_msg]}
+
+    except Exception as e:
+        print(f"[sql_agent_node] failed: {e}")
+        return {
+            **state,
+            "messages": [],
+            "sql_executed": "",
+            "sql_results": [],
+            "sql_queries_run": [],
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,7 +542,6 @@ def general_node(state: AgentState) -> AgentState:
             route_taken="general",
             image_paths=None,
         )
-        _persist_turn(state, answer)
         print("[general_node] answer generated")
         return {**state, "response": response}
 
@@ -438,7 +563,7 @@ def general_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 5 — Both  (SQL + KB, then merge in response_node)
+# Node 5 — Both  (SQL agent + KB agent, then merge in response_node)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -468,14 +593,48 @@ def _extract_sql_facts(rows: list) -> str:
 
 def both_node(state: AgentState) -> AgentState:
     """
-    Run NL2SQL first, then KB retrieval (LLM-selected tool), and store
-    both results for response_node to merge into a single answer.
+    Run SQL agent first (LLM-selected tool), then KB retrieval
+    (LLM-selected tool), and store both results for response_node to
+    merge into a single answer.
+
+    SQL is executed directly here (not via graph ToolNode) so we can
+    inspect the rows immediately for _extract_sql_facts before handing
+    off to the KB path.
     """
     history = state.get("conversation_history") or []
     enriched = _enrich_query(state["query"], history)
 
-    # 1. SQL — pure NL2SQL, no hardcoded queries
-    sql, rows = _run_nl2sql(enriched)
+    # 1. SQL — LLM-driven tool selection, executed directly
+    sql_llm = _get_sql_agent_llm()
+    history_text = _format_history(history)
+    human_msg = HumanMessage(
+        content=SQL_AGENT_PROMPT_TEMPLATE.format_messages(
+            query=enriched,
+            history=history_text,
+        )[-1].content
+    )
+    ai_msg: AIMessage = sql_llm.invoke([human_msg])
+    tool_calls = getattr(ai_msg, "tool_calls", None) or []
+
+    sql, rows = "", []
+    if tool_calls:
+        tool_name = tool_calls[0].get("name", "")
+        tool_args = tool_calls[0].get("args", {})
+        print(f"[both_node] SQL agent selected tool: {tool_name!r}")
+        try:
+            if tool_name == "nl2sql_execute_multi":
+                sql_a, rows_a = _run_nl2sql(tool_args.get("question_a", enriched))
+                sql_b, rows_b = _run_nl2sql(tool_args.get("question_b", ""))
+                sql = f"{sql_a}\n\n{sql_b}".strip()
+                rows = rows_a + rows_b
+            else:
+                sql, rows = _run_nl2sql(tool_args.get("question", enriched))
+        except Exception as e:
+            print(f"[both_node] SQL tool execution failed: {e}")
+    else:
+        print("[both_node] SQL agent made no tool call; falling back to direct NL2SQL")
+        sql, rows = _run_nl2sql(enriched)
+
     sql_facts = _extract_sql_facts(rows)
 
     # 2. KB — LLM chooses vector vs hybrid
@@ -493,7 +652,7 @@ def both_node(state: AgentState) -> AgentState:
         "sql_executed": sql,
         "sql_results": rows,
         "sql_facts": sql_facts,
-        "sql_queries_run": [sql] if sql else [],
+        "sql_queries_run": [s for s in sql.split("\n\n") if s] if sql else [],
     }
 
 
@@ -507,8 +666,9 @@ def response_node(state: AgentState) -> AgentState:
     Generate the final customer-facing answer.
 
     Route handling:
-      knowledge_base → KB_GENERATION_PROMPT  (uses kb_context from state)
-      sql_query      → SQL_ANSWER_PROMPT     (uses sql_executed + sql_results)
+      knowledge_base → KB_GENERATION_PROMPT  (uses kb_context from state or ToolMessages)
+      sql_query      → SQL_ANSWER_PROMPT     (uses sql_executed + sql_results;
+                                              reads from ToolMessages if agent ran)
       both           → COMBINED_ANSWER_PROMPT (kb_context + sql_results together)
     """
     try:
@@ -518,8 +678,6 @@ def response_node(state: AgentState) -> AgentState:
 
         # ── KB-only path ─────────────────────────────────────────────────────
         if route == "knowledge_base":
-            # kb_context may already be set (fallback path in kb_agent_node)
-            # or it comes from ToolMessage results written by kb_tool_node.
             kb_context = state.get("kb_context")
             if not kb_context:
                 tool_messages = [
@@ -576,7 +734,6 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="knowledge_base",
                 image_paths=image_paths,
             )
-            _persist_turn(state, answer)
             print(
                 f"[response_node/kb] answer generated — {len(image_paths or [])} image(s)"
             )
@@ -584,8 +741,15 @@ def response_node(state: AgentState) -> AgentState:
 
         # ── SQL-only path ─────────────────────────────────────────────────────
         if route == "sql_query":
+            # Prefer state values set by fallback in sql_agent_node.
+            # If the tool loop ran, read from ToolMessages instead.
             sql_executed = state.get("sql_executed") or ""
             sql_results = state.get("sql_results") or []
+
+            if not sql_executed:
+                sql_executed, sql_results = _parse_sql_tool_messages(
+                    state.get("messages") or []
+                )
 
             result = (SQL_ANSWER_PROMPT_TEMPLATE | llm).invoke(
                 {
@@ -607,7 +771,6 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="sql_query",
                 image_paths=None,
             )
-            _persist_turn(state, answer)
             print("[response_node/sql] answer generated")
             return {**state, "response": response}
 
@@ -667,7 +830,6 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="both",
                 image_paths=image_paths or None,
             )
-            _persist_turn(state, answer)
             print(f"[response_node/both] merged answer — {len(image_paths)} image(s)")
             return {**state, "response": response}
 

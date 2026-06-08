@@ -8,12 +8,12 @@ Templates and their {variables}:
     GENERAL_PROMPT_TEMPLATE         {query}, {history}
     SPEND_SUMMARY_PROMPT_TEMPLATE   {context_json}, {history}
     NL2SQL_PROMPT_TEMPLATE          {query}
+    SQL_AGENT_PROMPT_TEMPLATE       {query}, {history}   ← NEW (tool-bound SQL agent)
     SQL_ANSWER_PROMPT_TEMPLATE      {query}, {sql_executed}, {sql_results}, {history}
     KB_GENERATION_PROMPT_TEMPLATE   {query}, {context}, {history}
 """
 
 from langchain_core.prompts import ChatPromptTemplate
-
 
 # ── Router ─────────────────────────────────────────────────────────────────────
 
@@ -52,10 +52,12 @@ Classify the user's query into EXACTLY one of three routes:
 Reply with ONLY the route label — one of "knowledge_base", "sql_query", "both", or "general".
 No explanation, no punctuation, no extra words. Just the label."""
 
-ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", ROUTER_SYSTEM_PROMPT),
-    ("human", "Query: {query}"),
-])
+ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", ROUTER_SYSTEM_PROMPT),
+        ("human", "Query: {query}"),
+    ]
+)
 
 
 # ── General (catch-all) ────────────────────────────────────────────────────────
@@ -72,16 +74,18 @@ Guidelines:
 - Never pretend to have access to data you don't have.
 - Keep responses short and friendly."""
 
-GENERAL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", GENERAL_SYSTEM_PROMPT),
-    (
-        "human",
-        """Recent conversation history (may be empty):
+GENERAL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", GENERAL_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (may be empty):
 {history}
 
 User message: {query}""",
-    ),
-])
+        ),
+    ]
+)
 
 
 # ── Spend Summary Narrative ────────────────────────────────────────────────────
@@ -115,19 +119,21 @@ Return ONLY a JSON object:
   "tip": "..."
 }
 """
-SPEND_SUMMARY_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", SPEND_SUMMARY_SYSTEM_PROMPT),
-    (
-        "human",
-        """Recent conversation history (for context, may be empty):
+SPEND_SUMMARY_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", SPEND_SUMMARY_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (for context, may be empty):
 {history}
 
 Billing cycle SQL results:
 {context_json}
 
-Write the summary_text and tip JSON."""
-    ),
-])
+Write the summary_text and tip JSON.""",
+        ),
+    ]
+)
 
 
 # ── NL2SQL ─────────────────────────────────────────────────────────────────────
@@ -231,10 +237,55 @@ RULES
 - Reward redemption rate: 1 point = ₹0.25
 """
 
-NL2SQL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", NL2SQL_SYSTEM_PROMPT),
-    ("human", "Question: {query}"),
-])
+NL2SQL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", NL2SQL_SYSTEM_PROMPT),
+        ("human", "Question: {query}"),
+    ]
+)
+
+
+# ── SQL Agent (tool-bound) ─────────────────────────────────────────────────────
+# Used by sql_agent_node. The LLM is bound with SQL_TOOLS and decides which
+# tool(s) to call — no keyword matching, no hardcoded query pipelines.
+
+SQL_AGENT_SYSTEM_PROMPT = """You are a data retrieval agent for NorthStar Bank's credit card platform.
+
+You have access to two SQL tools:
+  • nl2sql_execute  — converts a natural-language question into SQL and executes it.
+                      Use this for any question that needs a single query: transactions,
+                      balances, rewards, billing summaries, fee-waiver checks, etc.
+  • nl2sql_execute_multi — runs TWO independent NL questions as separate SQL queries and
+                           returns both result sets. Use this when the user asks a
+                           comparative question (e.g. "this month vs last month",
+                           "compare spending across two cards") or when you need two
+                           logically distinct data sets to answer fully.
+
+DECISION RULES
+==============
+1. Call nl2sql_execute for any single-focus question.
+2. Call nl2sql_execute_multi when the question clearly requires two separate queries
+   (e.g. month-over-month comparison, two different card IDs, transactions + rewards together).
+3. Never call both tools in the same turn — pick the right one upfront.
+4. Do NOT write SQL yourself — always delegate to the tools.
+5. Pass the user's question (with any context from conversation history already embedded)
+   verbatim or lightly clarified — do not strip card IDs, dates, or billing periods.
+
+Conversation history (if any) is provided in the human message so you can resolve
+references like "my card", "last month", or "the one I asked about earlier"."""
+
+SQL_AGENT_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", SQL_AGENT_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (may be empty):
+{history}
+
+User question: {query}""",
+        ),
+    ]
+)
 
 
 # ── Generic SQL Answer ─────────────────────────────────────────────────────────
@@ -254,11 +305,12 @@ RULES:
 8. If results are empty, say "No data found for this period" — never hallucinate figures.
 9. If conversation history is provided, use it to resolve follow-up references."""
 
-SQL_ANSWER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", SQL_ANSWER_SYSTEM_PROMPT),
-    (
-        "human",
-        """Recent conversation history (may be empty):
+SQL_ANSWER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", SQL_ANSWER_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (may be empty):
 {history}
 
 Question: {query}
@@ -267,9 +319,10 @@ SQL executed:
 {sql_executed}
 
 Query results:
-{sql_results}"""
-    ),
-])
+{sql_results}""",
+        ),
+    ]
+)
 
 
 # ── KB Generation ──────────────────────────────────────────────────────────────
@@ -320,19 +373,21 @@ RULES:
     (e.g., "As shown in the fee schedule diagram..."). Do not mention file paths.
 """
 
-KB_GENERATION_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", KB_GENERATION_SYSTEM_PROMPT),
-    (
-        "human",
-        """Recent conversation history (may be empty):
+KB_GENERATION_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", KB_GENERATION_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (may be empty):
 {history}
 
 Context from documents:
 {context}
 
-Question: {query}"""
-    ),
-])
+Question: {query}""",
+        ),
+    ]
+)
 
 
 # ── Combined KB + SQL Answer ───────────────────────────────────────────────────
@@ -361,11 +416,12 @@ CONTENT RULES:
 6. Cite document sources only when valid (filename + page). Never show None/null citations.
 7. If conversation history is provided, use it to resolve follow-up references."""
 
-COMBINED_ANSWER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
-    ("system", COMBINED_ANSWER_SYSTEM_PROMPT),
-    (
-        "human",
-        """Recent conversation history (may be empty):
+COMBINED_ANSWER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
+    [
+        ("system", COMBINED_ANSWER_SYSTEM_PROMPT),
+        (
+            "human",
+            """Recent conversation history (may be empty):
 {history}
 
 Document context (policy / knowledge base):
@@ -375,5 +431,6 @@ Account data (SQL results):
 {sql_results}
 
 Customer question: {query}""",
-    ),
-])
+        ),
+    ]
+)

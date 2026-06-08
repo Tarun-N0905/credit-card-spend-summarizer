@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Credit Card Spend Summarizer with LangGraph agent, FastAPI, and RAG"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.111.0",
+    "fastapi[standard]>=0.111.0",
     "uvicorn[standard]>=0.29.0",
     "streamlit>=1.35.0",
     "langgraph>=0.1.0",
@@ -24,6 +24,7 @@ dependencies = [
     "pandas>=2.2.0",
     "langchain-community>=0.4.2",
     "cohere>=7.0.3",
+    "mistune>=3.2.1",
 ]
 
 [build-system]

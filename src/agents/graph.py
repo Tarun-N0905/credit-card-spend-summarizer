@@ -1,13 +1,20 @@
 """
 src/agents/graph.py
 
-LangGraph state machine (ToolNode as an actual graph node).
+LangGraph state machine — both KB and SQL use ToolNode-backed agent nodes.
 
 Flow:
-    history_loader → router → kb_agent → kb_tool_node → response → END
-                           ├→ sql_search                ↗
-                           ├→ both                     ↗
-                           └→ general                       → END
+    history_loader → router → kb_agent  → kb_tool_node  → response → END
+                           ├→ sql_agent → sql_tool_node ↗
+                           ├→ both                      ↗
+                           └→ general                        → END
+
+Key design decisions
+────────────────────
+• KB path  : kb_agent_node  emits tool_calls → kb_tool_node  (ToolNode) executes them
+• SQL path : sql_agent_node emits tool_calls → sql_tool_node (ToolNode) executes them
+• No keyword matching anywhere — the LLM bound to each agent decides which tool to call.
+• response_node reads ToolMessage results from state["messages"] for both paths.
 """
 
 from langgraph.graph import StateGraph, END
@@ -17,53 +24,63 @@ from src.agents.nodes import (
     AgentState,
     history_loader_node,
     router_node,
-    kb_agent_node,  # NEW
-    sql_search_node,
+    kb_agent_node,
+    sql_agent_node,
     general_node,
     both_node,
     response_node,
-    KB_TOOLS,  # NEW
+    KB_TOOLS,
+    SQL_TOOLS,
 )
 
 
 def build_agent_graph():
     graph = StateGraph(AgentState)
 
+    # ── Nodes ──────────────────────────────────────────────────────────────────
     graph.add_node("history_loader", history_loader_node)
     graph.add_node("router", router_node)
 
-    # NEW AGENT + TOOL NODES
+    # KB agent + tool executor
     graph.add_node("kb_agent", kb_agent_node)
     graph.add_node("kb_tool_node", ToolNode(KB_TOOLS))
 
-    graph.add_node("sql_search", sql_search_node)
+    # SQL agent + tool executor  ← NEW
+    graph.add_node("sql_agent", sql_agent_node)
+    graph.add_node("sql_tool_node", ToolNode(SQL_TOOLS))
+
     graph.add_node("general", general_node)
     graph.add_node("both", both_node)
     graph.add_node("response", response_node)
 
+    # ── Entry point ────────────────────────────────────────────────────────────
     graph.set_entry_point("history_loader")
 
+    # ── history_loader → router ────────────────────────────────────────────────
     graph.add_edge("history_loader", "router")
 
+    # ── router → agent nodes ───────────────────────────────────────────────────
     graph.add_conditional_edges(
         "router",
         lambda state: state.get("route", "general"),
         {
             "knowledge_base": "kb_agent",
+            "sql_query": "sql_agent",
             "both": "both",
-            "sql_query": "sql_search",
             "general": "general",
         },
     )
 
-    # KB TOOL FLOW
+    # ── KB flow: agent → tool node → response ─────────────────────────────────
     graph.add_edge("kb_agent", "kb_tool_node")
     graph.add_edge("kb_tool_node", "response")
 
-    # OTHER FLOWS
-    graph.add_edge("sql_search", "response")
-    graph.add_edge("both", "response")
+    # ── SQL flow: agent → tool node → response ────────────────────────────────
+    graph.add_edge("sql_agent", "sql_tool_node")
+    graph.add_edge("sql_tool_node", "response")
 
+    # ── Both + general flows ───────────────────────────────────────────────────
+    graph.add_edge("both", "response")
     graph.add_edge("response", END)
     graph.add_edge("general", END)
 
@@ -83,6 +100,7 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         "route": "",
         "messages": [],
         "chunks": [],
+        "kb_context": None,
         "sql_executed": None,
         "sql_results": None,
         "sql_queries_run": [],

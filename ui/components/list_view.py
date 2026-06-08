@@ -16,8 +16,8 @@ import streamlit as st
 from state import start_new_chat, go_to_list
 from api_client import fetch_conversations, load_conversation_messages
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _format_date(iso_str: str) -> str:
     """
@@ -34,6 +34,7 @@ def _format_date(iso_str: str) -> str:
 
 
 # ── Sub-renders ───────────────────────────────────────────────────────────────
+
 
 def render_new_chat_button() -> None:
     """
@@ -54,7 +55,8 @@ def render_backend_error_state() -> None:
       Retry     — re-fetches conversations (reruns the page)
       New Chat  — always available even when the backend is down
     """
-    st.markdown("""
+    st.markdown(
+        """
     <div class="cs-empty">
         <div class="cs-empty-icon">⚠️</div>
         <div class="cs-empty-text">
@@ -62,7 +64,9 @@ def render_backend_error_state() -> None:
             Please check the backend and try again.
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     col_retry, col_new = st.columns(2)
     with col_retry:
@@ -79,7 +83,8 @@ def render_empty_conversations_state() -> None:
     conversations exist. Shows a prompt and the New Chat button.
     This is a normal happy-path state, not an error.
     """
-    st.markdown("""
+    st.markdown(
+        """
     <div class="cs-empty">
         <div class="cs-empty-icon">💬</div>
         <div class="cs-empty-text">
@@ -87,45 +92,75 @@ def render_empty_conversations_state() -> None:
             Start a new one below.
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
     render_new_chat_button()
 
 
 def render_conversation_card(conv: dict, index: int) -> None:
     """
-    Render a single past conversation as a styled card with an Open button.
+    Render a single past conversation card with Open and Delete buttons.
 
-    Shows the first message preview text and the conversation date.
-    Preview text is HTML-escaped so special characters in message content
-    never break the card layout.
-    Clicking Open loads the conversation messages and switches to chat view.
-    If loading fails, error banner shows and list view stays visible.
+    Delete triggers confirm_delete flow: inline confirmation replaces
+    the card buttons. Confirmed delete calls delete_conversation() and
+    refreshes the list.
 
     Args:
         conv  : Dict with keys: session_id, preview, created_at
-        index : Unique index to key the Streamlit button per card
+        index : Unique index to key the Streamlit buttons per card
     """
     safe_preview = html.escape(conv.get("preview", "No messages yet"))
-    date_label   = _format_date(conv.get("created_at", ""))
+    date_label = _format_date(conv.get("created_at", ""))
+    session_id = conv["session_id"]
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="cs-card">
         <div class="cs-card-preview">{safe_preview}</div>
         <div class="cs-card-date">{date_label}</div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button("Open", key=f"open_conv_{index}"):
-        session_id = conv["session_id"]
-        success = load_conversation_messages(session_id)
-        if success:
-            st.session_state.session_id = session_id
-            st.session_state.view = "chat"
-            st.session_state.confirm_delete = False
-        st.rerun()
+    # Inline delete confirmation state per card
+    confirm_key = f"confirm_delete_card_{index}"
+    if st.session_state.get(confirm_key):
+        st.markdown(
+            '<div class="cs-confirm">Delete this conversation? Cannot be undone.</div>',
+            unsafe_allow_html=True,
+        )
+        cy, cn, _ = st.columns([2, 2, 6])
+        with cy:
+            if st.button("Yes, Delete", key=f"del_yes_{index}"):
+                from api_client import delete_conversation
+
+                delete_conversation(session_id)
+                st.session_state[confirm_key] = False
+                st.rerun()
+        with cn:
+            if st.button("Cancel", key=f"del_no_{index}"):
+                st.session_state[confirm_key] = False
+                st.rerun()
+    else:
+        col_open, col_del, col_spacer = st.columns([2, 2, 6])
+        with col_open:
+            if st.button("Open", key=f"open_conv_{index}"):
+                success = load_conversation_messages(session_id)
+                if success:
+                    st.session_state.session_id = session_id
+                    st.session_state.view = "chat"
+                    st.session_state.confirm_delete = False
+                st.rerun()
+        with col_del:
+            if st.button("🗑 Delete", key=f"delete_conv_{index}"):
+                st.session_state[confirm_key] = True
+                st.rerun()
 
 
 # ── Main list view render ─────────────────────────────────────────────────────
+
 
 def render_list_view() -> None:
     """
