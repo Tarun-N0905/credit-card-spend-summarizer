@@ -28,7 +28,7 @@ from components.chat import (
 st.set_page_config(
     page_title="Credit Spend Summarizer",
     page_icon="💳",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -56,34 +56,82 @@ section.main,
 
 /* ── Hide Streamlit chrome ── */
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding-top: 2rem; padding-bottom: 6rem; max-width: 760px; }
-
-/* ── Header ── */
-.cs-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 2rem;
-    padding-bottom: 1.2rem;
-    border-bottom: 1px solid #1e2130;
+.block-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-left: 2rem;
+    padding-right: 2rem;
+    padding-top: 72px !important;   /* clear fixed header */
+    padding-bottom: 80px !important; /* clear fixed input bar */
 }
-.cs-header-icon {
-    font-size: 1.6rem;
-    background: linear-gradient(135deg, #4f6ef7, #a78bfa);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+
+/* ── Fixed header (both views) ── */
+.cs-header-fixed {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    background: #0d0f14;
+    border-bottom: 1px solid #1e2130;
+    padding: 0.75rem 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 64px;
 }
 .cs-header-title {
-    font-size: 1.15rem;
+    font-size: 1.1rem;
     font-weight: 600;
     color: #e8eaf0;
     letter-spacing: -0.3px;
 }
 .cs-header-sub {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: #555870;
     font-family: 'JetBrains Mono', monospace;
     margin-top: 2px;
+}
+
+/* Spacer so content doesn't hide under fixed header */
+.cs-header-spacer {
+    height: 72px;
+}
+
+/* Back / Delete buttons fixed to top via :has() selector */
+div[data-testid="stHorizontalBlock"]:has(button[kind="secondary"][data-testid="baseButton-secondary"]:first-child) {
+    /* fallback — overridden by the more specific rule in chat.py inline style */
+}
+
+/* Back button in the input bar — style to distinguish from Send */
+div[data-testid="stHorizontalBlock"]:has(input[aria-label="message"]) [data-testid="column"]:last-child .stButton > button {
+    background: rgba(40, 44, 68, 0.95) !important;
+    border: 1px solid #2e3248 !important;
+}
+
+/* ── Fixed input bar at the bottom ── */
+.cs-input-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    background: #0d0f14;
+    border-top: 1px solid #1e2130;
+    padding: 0.75rem 2rem;
+}
+/* Force Streamlit horizontal block inside cs-input-bar to fill width */
+.cs-input-bar .stHorizontalBlock {
+    width: 100%;
+    align-items: center;
+}
+.cs-input-bar [data-testid="column"] {
+    display: flex;
+    align-items: center;
+}
+.cs-input-bar .stButton > button {
+    width: 100% !important;
 }
 
 /* ── Conversation cards ── */
@@ -92,7 +140,7 @@ section.main,
     border: 1px solid #1e2130;
     border-radius: 12px;
     padding: 0.85rem 1.1rem;
-    margin-bottom: 0.65rem;
+    margin-bottom: 0;          /* card and button share one visual block */
     transition: border-color 0.15s;
 }
 .cs-card:hover { border-color: #3b5bdb; }
@@ -108,6 +156,48 @@ section.main,
     font-size: 0.68rem;
     color: #3a3e52;
     font-family: 'JetBrains Mono', monospace;
+}
+
+/* Open + Delete buttons pulled up into the card's right side */
+.cs-card-btn-wrap {
+    margin-top: -2.6rem;       /* pull up into the card */
+    margin-bottom: 0.65rem;
+    display: flex;
+    justify-content: flex-end;
+    padding-right: 0.5rem;
+    gap: 0.1rem;
+}
+/* Left-aligned variant */
+.cs-card-btn-left {
+    justify-content: flex-start !important;
+    padding-right: 0 !important;
+    padding-left: 1.1rem;
+}
+/* Shrink both buttons so they fit the card's right edge */
+.cs-card-btn-wrap .stButton > button {
+    width: auto !important;
+    padding: 0.3rem 0.85rem !important;
+    font-size: 0.78rem !important;
+    background: linear-gradient(135deg, #3b5bdb, #4c6ef5) !important;
+}
+/* Delete button — red */
+.cs-card-btn-wrap [data-testid="column"]:last-child .stButton > button {
+    background: linear-gradient(135deg, #c0392b, #e74c3c) !important;
+}
+/* Override the horizontal block inside the wrap to stay compact */
+.cs-card-btn-wrap [data-testid="stHorizontalBlock"] {
+    gap: 0.4rem !important;
+    flex-wrap: nowrap !important;
+    width: auto !important;
+}
+
+.cs-chat-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: #0d0f14;
+    padding: 12px 0;
+    border-bottom: 1px solid #1e2130;
 }
 
 /* ── Section label ── */
@@ -242,7 +332,8 @@ section.main,
     font-weight: 500 !important;
     padding: 0.6rem 1rem !important;
     white-space: nowrap !important;
-    width: 100% !important;
+    width: auto !important;
+    min-width: 90px;
     transition: opacity 0.15s !important;
 }
 .stButton > button:hover { opacity: 0.85 !important; }
