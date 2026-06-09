@@ -14,9 +14,9 @@ def search_hybrid(
     top_k: int = FINAL_K,
 ) -> list[RetrievedChunk]:
 
-    # --------------------------------------------------
+     
     # Step 1: Retrieve candidates
-    # --------------------------------------------------
+     
 
     vector_chunks = search_semantic(
         query=query,
@@ -29,9 +29,9 @@ def search_hybrid(
         top_k=FTS_K,
     )
 
-    # --------------------------------------------------
+     
     # Step 2: Deduplicate
-    # --------------------------------------------------
+     
 
     combined: dict[str, RetrievedChunk] = {}
 
@@ -43,9 +43,9 @@ def search_hybrid(
 
     candidates = list(combined.values())
 
-    # --------------------------------------------------
+     
     # Step 3: Cohere rerank
-    # --------------------------------------------------
+     
 
     return rerank_results(
         query=query,

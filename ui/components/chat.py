@@ -16,7 +16,7 @@ import streamlit as st
 from state import add_message, clear_error, go_to_list
 from api_client import send_chat_message, delete_conversation
 
-# ── Chat controls ─────────────────────────────────────────────────────────────
+# Chat controls
 
 
 def render_chat_controls() -> None:
@@ -27,7 +27,7 @@ def render_chat_controls() -> None:
     st.markdown('<hr class="cs-divider">', unsafe_allow_html=True)
 
 
-# ── Message renders ───────────────────────────────────────────────────────────
+# Message renders
 
 
 def render_message(role: str, content: str, timestamp: str) -> None:
@@ -152,7 +152,7 @@ def render_conversation() -> None:
         render_typing_indicator()
 
 
-# ── Input bar ─────────────────────────────────────────────────────────────────
+#  Input bar
 
 
 def render_input_bar() -> None:

@@ -15,7 +15,7 @@ Templates and their {variables}:
 
 from langchain_core.prompts import ChatPromptTemplate
 
-# ── Router ─────────────────────────────────────────────────────────────────────
+#  Router
 
 ROUTER_SYSTEM_PROMPT = """You are a query router for a credit card RAG agent system.
 
@@ -60,7 +60,7 @@ ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
 )
 
 
-# ── General (catch-all) ────────────────────────────────────────────────────────
+# General (catch-all)
 
 GENERAL_SYSTEM_PROMPT = """You are a helpful assistant for NorthStar Bank's credit card platform.
 
@@ -88,7 +88,7 @@ User message: {query}""",
 )
 
 
-# ── Spend Summary Narrative ────────────────────────────────────────────────────
+#  Spend Summary Narrative
 # Takes all 7 SQL results as JSON → returns {summary_text, tip}
 
 SPEND_SUMMARY_SYSTEM_PROMPT = """You are a friendly and professional credit card advisor for NorthStar Bank.
@@ -136,7 +136,7 @@ Write the summary_text and tip JSON.""",
 )
 
 
-# ── NL2SQL ─────────────────────────────────────────────────────────────────────
+#  NL2SQL
 # Database: agentic_credit_rag (business / transactional data)
 # Accessed by the cc_readonly role.
 
@@ -245,7 +245,7 @@ NL2SQL_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
 )
 
 
-# ── SQL Agent (tool-bound) ─────────────────────────────────────────────────────
+#  SQL Agent (tool-bound)
 # Used by sql_agent_node. The LLM is bound with SQL_TOOLS and decides which
 # tool(s) to call — no keyword matching, no hardcoded query pipelines.
 
@@ -288,7 +288,7 @@ User question: {query}""",
 )
 
 
-# ── Generic SQL Answer ─────────────────────────────────────────────────────────
+#  Generic SQL Answer
 
 SQL_ANSWER_SYSTEM_PROMPT = """You are a friendly data analyst for NorthStar Bank credit card inquiries.
 
@@ -325,7 +325,7 @@ Query results:
 )
 
 
-# ── KB Generation ──────────────────────────────────────────────────────────────
+#  KB Generation
 # Database: credit_multimodel_rag — RAG chunks from policy / onboarding documents
 
 KB_GENERATION_SYSTEM_PROMPT = """You are a helpful credit card specialist for NorthStar Bank.
@@ -390,7 +390,7 @@ Question: {query}""",
 )
 
 
-# ── Combined KB + SQL Answer ───────────────────────────────────────────────────
+#  Combined KB + SQL Answer
 
 COMBINED_ANSWER_SYSTEM_PROMPT = """You are a helpful credit card specialist for NorthStar Bank.
 

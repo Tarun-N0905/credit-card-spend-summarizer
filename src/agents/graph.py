@@ -39,7 +39,7 @@ from src.agents.nodes import (
 def build_agent_graph():
     graph = StateGraph(AgentState)
 
-    # ── Nodes
+    #  Nodes
     graph.add_node("history_loader", history_loader_node)
     graph.add_node("router", router_node)
 
@@ -54,13 +54,13 @@ def build_agent_graph():
     graph.add_node("general", general_node)
     graph.add_node("response", response_node)
 
-    # ── Entry point ────────────────────────────────────────────────────────────
+    #  Entry point  
     graph.set_entry_point("history_loader")
 
-    # ── history_loader → router ────────────────────────────────────────────────
+    #  history_loader → router  
     graph.add_edge("history_loader", "router")
 
-    # ── router → agent nodes ───────────────────────────────────────────────────
+    #  router → agent nodes  
     graph.add_conditional_edges(
         "router",
         lambda state: state.get("route", "general"),
@@ -72,10 +72,10 @@ def build_agent_graph():
         },
     )
 
-    # ── KB flow: agent → tool node → response ─────────────────────────────────
+    #  KB flow: agent → tool node → response 
     graph.add_edge("kb_agent", "kb_tool_node")
 
-    # ── kb_tool_node branches: KB-only → response, both → sql_agent ───────────
+    #  kb_tool_node branches: KB-only → response, both → sql_agent 
     graph.add_conditional_edges(
         "kb_tool_node",
         lambda state: "sql_agent" if state.get("route") == "both" else "response",
@@ -85,11 +85,11 @@ def build_agent_graph():
         },
     )
 
-    # ── SQL flow: agent → tool node → response ────────────────────────────────
+    #  SQL flow: agent → tool node → response 
     graph.add_edge("sql_agent", "sql_tool_node")
     graph.add_edge("sql_tool_node", "response")
 
-    # ── general flow ───────────────────────────────────────────────────────────
+    #  general flow  
     graph.add_edge("response", END)
     graph.add_edge("general", END)
 

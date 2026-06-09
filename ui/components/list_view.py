@@ -16,7 +16,7 @@ import streamlit as st
 from state import start_new_chat, go_to_list
 from api_client import fetch_conversations, load_conversation_messages
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+#  Helpers  
 
 
 def _format_date(iso_str: str) -> str:
@@ -33,7 +33,7 @@ def _format_date(iso_str: str) -> str:
         return iso_str
 
 
-# ── Sub-renders ───────────────────────────────────────────────────────────────
+#  Sub-renders  
 
 
 def render_new_chat_button() -> None:
@@ -121,7 +121,7 @@ def render_conversation_card(conv: dict, index: int) -> None:
     session_id = conv["session_id"]
     confirm_key = f"confirm_delete_card_{index}"
 
-    # ── Card shell — flex row: text on left, buttons on right ────────────────
+    #  Card shell — flex row: text on left, buttons on right 
     # We render the card HTML, then use an overlapping columns trick:
     # a 1-px-height negative-margin container pulls Streamlit buttons
     # up into the card's visual space using CSS positioning.
@@ -184,7 +184,7 @@ def render_conversation_card(conv: dict, index: int) -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Inline delete confirmation ────────────────────────────────────────────
+    #  Inline delete confirmation 
     if st.session_state.get(confirm_key):
         st.markdown(
             '<div class="cs-confirm">⚠ Delete this conversation? This cannot be undone.</div>',
@@ -219,7 +219,7 @@ def render_conversation_card(conv: dict, index: int) -> None:
                 st.rerun()
 
 
-# ── Main list view render ─────────────────────────────────────────────────────
+#  Main list view render 
 
 
 def render_list_view() -> None:

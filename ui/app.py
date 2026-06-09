@@ -23,7 +23,7 @@ from components.chat import (
     render_input_bar,
 )
 
-# ── Page config ───────────────────────────────────────────────────────────────
+#  Page config  
 
 st.set_page_config(
     page_title="Credit Spend Summarizer",
@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Global CSS ────────────────────────────────────────────────────────────────
+#  Global CSS  
 
 st.markdown(
     """
@@ -41,7 +41,7 @@ st.markdown(
 
 /*
  * VSCode Dark+ theme
- * ─────────────────────────────────────────────────────────
+ 
  * bg:          #1e1e1e   (editor background)
  * sidebar-bg:  #252526   (side bar)
  * panel-bg:    #2d2d2d   (input / panel areas)
@@ -58,7 +58,7 @@ st.markdown(
  * error-bg:    #1f1a1a
  * error-border:#f44747
  * error-fg:    #f44747
- * ─────────────────────────────────────────────────────────
+ 
 */
 
 /* ── Base ── */
@@ -395,7 +395,7 @@ button[kind="secondary"]:hover, .cs-back-btn button:hover {
 )
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+#  Main  
 
 
 def main() -> None:
