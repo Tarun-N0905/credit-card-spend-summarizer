@@ -44,9 +44,10 @@ from src.agents.prompts import (
     SQL_ANSWER_PROMPT_TEMPLATE,
 )
 from src.agents.schemas import AgentResponse
-from src.services.rag_service import retrieve as hybrid_retrieve, format_context
+from src.services.rag_service import format_context
 from src.services.sql_service import execute_sql
 from src.retrieval.vector_search import search_semantic
+from src.retrieval.hybrid_search import search_hybrid
 from src.core.db import (
     get_or_create_conversation,
     save_message,
@@ -73,7 +74,7 @@ def hybrid_search_tool(query: str) -> str:
     - "How does the fee-waiver threshold work for Platinum?"
     - "Compare reward rates across card variants"
     """
-    chunks = hybrid_retrieve(query, top_k=5)
+    chunks = search_hybrid(query, top_k=5)
     return format_context(chunks)
 
 
