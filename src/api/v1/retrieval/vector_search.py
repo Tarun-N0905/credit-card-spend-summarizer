@@ -1,11 +1,10 @@
 import json
 
-from src.core.db import get_db
-from src.core.embeddings import embed_query
+from src.api.v1.core.db import get_db
+from src.api.v1.core.embeddings import embed_query
 
-from src.retrieval.schemas import RetrievedChunk
-from src.retrieval.reranker import rerank_results
-
+from src.api.v1.retrieval.schemas import RetrievedChunk
+from src.api.v1.retrieval.reranker import rerank_results
 
 VECTOR_TOP_K = 10
 FINAL_TOP_K = 5

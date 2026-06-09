@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from src.core.db import (
+from src.api.v1.core.db import (
     list_conversations,
     get_or_create_conversation,
     get_conversation_messages,

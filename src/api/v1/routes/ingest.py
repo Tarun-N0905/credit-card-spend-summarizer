@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import JSONResponse
 
-from src.ingestion.ingestion import run_ingestion
+from src.api.v1.ingestion.ingestion import run_ingestion
 
 router = APIRouter()
 

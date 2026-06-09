@@ -19,9 +19,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from src.core.db import store_chunks, upsert_document
-from src.ingestion.docling_parser import parse_document
-from src.ingestion.deduplication import deduplicate_chunks
+from src.api.v1.core.db import store_chunks, upsert_document
+from src.api.v1.ingestion.docling_parser import parse_document
+from src.api.v1.ingestion.deduplication import deduplicate_chunks
 
 load_dotenv()
 

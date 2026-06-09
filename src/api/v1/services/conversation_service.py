@@ -18,7 +18,9 @@ Used by nodes.py to:
 import logging
 from uuid import UUID
 
-from src.core.db import get_rag_db_session  # SQLAlchemy session for credit_multimodel_rag
+from src.api.v1.core.db import (
+    get_rag_db_session,
+)  # SQLAlchemy session for credit_multimodel_rag
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ def get_or_create_conversation(session_id: str) -> UUID:
     with get_rag_db_session() as session:
         row = session.execute(
             "SELECT id FROM conversations WHERE session_id = :sid LIMIT 1",
-            {"sid": session_id}
+            {"sid": session_id},
         ).fetchone()
 
         if row:
@@ -39,7 +41,7 @@ def get_or_create_conversation(session_id: str) -> UUID:
 
         result = session.execute(
             "INSERT INTO conversations (session_id) VALUES (:sid) RETURNING id",
-            {"sid": session_id}
+            {"sid": session_id},
         )
         session.commit()
         return result.fetchone()[0]
@@ -59,7 +61,7 @@ def load_recent_messages(conversation_id: UUID, limit: int = 6) -> list[dict]:
             ORDER BY created_at DESC
             LIMIT :lim
             """,
-            {"cid": str(conversation_id), "lim": limit}
+            {"cid": str(conversation_id), "lim": limit},
         ).fetchall()
 
     # Reverse so oldest is first (chronological)
@@ -74,6 +76,6 @@ def save_message(conversation_id: UUID, role: str, content: str) -> None:
             INSERT INTO messages (conversation_id, role, content)
             VALUES (:cid, :role, :content)
             """,
-            {"cid": str(conversation_id), "role": role, "content": content}
+            {"cid": str(conversation_id), "role": role, "content": content},
         )
         session.commit()

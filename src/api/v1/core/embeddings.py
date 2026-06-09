@@ -15,7 +15,7 @@ import logging
 
 from langchain_openai import OpenAIEmbeddings
 
-from src.core.settings import settings
+from src.api.v1.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
     all_embeddings: list[list[float]] = []
 
     for batch_start in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[batch_start: batch_start + _BATCH_SIZE]
+        batch = texts[batch_start : batch_start + _BATCH_SIZE]
         logger.debug(
             "Embedding batch %d–%d of %d",
             batch_start,

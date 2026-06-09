@@ -1,8 +1,8 @@
 import logging
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
-from src.core.settings import get_settings
-from src.agents.prompts import NL2SQL_PROMPT_TEMPLATE
+from src.api.v1.core.settings import get_settings
+from src.api.v1.agents.prompts import NL2SQL_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ def execute_sql(sql: str) -> list[dict]:
         # SQLDatabase.run may return string; attempt parsing
         if isinstance(result, str):
             import json
+
             try:
                 result = json.loads(result)
             except Exception:

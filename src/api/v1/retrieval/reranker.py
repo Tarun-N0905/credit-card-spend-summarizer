@@ -1,12 +1,9 @@
 import cohere
 
-from src.core.settings import settings
-from src.retrieval.schemas import RetrievedChunk
+from src.api.v1.core.settings import settings
+from src.api.v1.retrieval.schemas import RetrievedChunk
 
-
-_client = cohere.ClientV2(
-    api_key=settings.cohere_api_key
-)
+_client = cohere.ClientV2(api_key=settings.cohere_api_key)
 
 
 def rerank_results(

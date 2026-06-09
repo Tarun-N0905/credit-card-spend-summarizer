@@ -2,8 +2,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from src.core.db import get_or_create_conversation, save_message
-from src.agents.graph import run_credit_card_agent
+from src.api.v1.core.db import get_or_create_conversation, save_message
+from src.api.v1.agents.graph import run_credit_card_agent
 
 router = APIRouter()
 

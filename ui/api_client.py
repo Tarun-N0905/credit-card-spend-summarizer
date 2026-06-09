@@ -18,7 +18,7 @@ import requests
 
 from state import clear_error, go_to_list
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:8000/api/v1"
 
 
 def fetch_conversations() -> bool:
@@ -39,7 +39,7 @@ def fetch_conversations() -> bool:
     """
     try:
         response = requests.get(
-            f"{API_BASE_URL}/api/v1/conversations",
+            f"{API_BASE_URL}/conversations",
             timeout=10,
         )
         response.raise_for_status()
@@ -68,25 +68,23 @@ def load_conversation_messages(session_id: str) -> bool:
     """
     try:
         response = requests.get(
-            f"{API_BASE_URL}/api/v1/conversations/{session_id}/messages",
+            f"{API_BASE_URL}/conversations/{session_id}/messages",
             timeout=10,
         )
         response.raise_for_status()
         raw_messages = response.json()
         st.session_state.messages = [
             {
-                "role":        msg["role"],
-                "content":     msg["content"],
-                "timestamp":   _format_ts(msg.get("created_at", "")),
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": _format_ts(msg.get("created_at", "")),
                 "image_paths": msg.get("image_paths") or [],
             }
             for msg in raw_messages
         ]
         return True
     except Exception:
-        st.session_state.error = (
-            "⚠ Could not load that conversation. Please try again."
-        )
+        st.session_state.error = "⚠ Could not load that conversation. Please try again."
         return False
 
 
@@ -110,16 +108,16 @@ def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
     """
     try:
         response = requests.post(
-            f"{API_BASE_URL}/api/v1/chat",
+            f"{API_BASE_URL}/chat",
             json={
                 "session_id": st.session_state.session_id,
-                "message":    user_input,
+                "message": user_input,
             },
             timeout=60,
         )
         response.raise_for_status()
-        data        = response.json()
-        reply       = data.get("reply", "No response received.")
+        data = response.json()
+        reply = data.get("reply", "No response received.")
         image_paths = data.get("image_paths") or []
         return reply, image_paths
 
@@ -129,9 +127,7 @@ def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
         )
         return None, []
     except requests.exceptions.Timeout:
-        st.session_state.error = (
-            "⚠ The request timed out. Please try again."
-        )
+        st.session_state.error = "⚠ The request timed out. Please try again."
         return None, []
     except Exception:
         st.session_state.error = (
@@ -154,7 +150,7 @@ def delete_conversation(session_id: str) -> bool:
     """
     try:
         response = requests.delete(
-            f"{API_BASE_URL}/api/v1/conversations/{session_id}",
+            f"{API_BASE_URL}/conversations/{session_id}",
             timeout=10,
         )
         response.raise_for_status()
@@ -167,7 +163,8 @@ def delete_conversation(session_id: str) -> bool:
         return False
 
 
-#  Internal helpers 
+#  Internal helpers
+
 
 def _format_ts(iso_str: str) -> str:
     """
@@ -178,6 +175,7 @@ def _format_ts(iso_str: str) -> str:
         iso_str : ISO 8601 datetime string e.g. "2026-06-05T14:32:00"
     """
     from datetime import datetime
+
     try:
         return datetime.fromisoformat(iso_str).strftime("%H:%M")
     except Exception:

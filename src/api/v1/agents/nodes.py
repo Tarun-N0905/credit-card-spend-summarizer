@@ -34,8 +34,8 @@ from typing import Annotated, TypedDict, Optional
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from src.core.settings import get_settings
-from src.agents.prompts import (
+from src.api.v1.core.settings import get_settings
+from src.api.v1.agents.prompts import (
     COMBINED_ANSWER_PROMPT_TEMPLATE,
     ROUTER_PROMPT_TEMPLATE,
     GENERAL_PROMPT_TEMPLATE,
@@ -44,12 +44,12 @@ from src.agents.prompts import (
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
 )
-from src.agents.schemas import AgentResponse
-from src.services.rag_service import format_context
-from src.services.sql_service import execute_sql
-from src.retrieval.vector_search import search_semantic
-from src.retrieval.hybrid_search import search_hybrid
-from src.core.db import (
+from src.api.v1.agents.schemas import AgentResponse
+from src.api.v1.services.rag_service import format_context
+from src.api.v1.services.sql_service import execute_sql
+from src.api.v1.retrieval.vector_search import search_semantic
+from src.api.v1.retrieval.hybrid_search import search_hybrid
+from src.api.v1.core.db import (
     get_or_create_conversation,
     save_message,
     get_conversation_messages,

@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from src.core.db import check_db_connection
+from src.api.v1.core.db import check_db_connection
 
 router = APIRouter()
 

@@ -1,6 +1,6 @@
 import logging
 from langchain_core.tools import tool
-from src.services.sql_service import query
+from src.api.v1.services.sql_service import query
 
 logger = logging.getLogger(__name__)
 

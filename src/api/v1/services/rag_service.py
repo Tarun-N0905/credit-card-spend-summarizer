@@ -1,5 +1,5 @@
 import logging
-from src.retrieval.schemas import RetrievedChunk
+from src.api.v1.retrieval.schemas import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 

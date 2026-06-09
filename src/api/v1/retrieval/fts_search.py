@@ -1,6 +1,6 @@
-from src.core.db import get_db
+from src.api.v1.core.db import get_db
 
-from src.retrieval.schemas import RetrievedChunk
+from src.api.v1.retrieval.schemas import RetrievedChunk
 
 
 def search_keyword(

@@ -1,4 +1,3 @@
-
 """
 src/core/db.py
 
@@ -22,16 +21,15 @@ from contextlib import contextmanager
 from typing import Generator
 import psycopg
 from psycopg.rows import dict_row
-from src.core.embeddings import embed_documents
-from src.core.settings import settings
+from src.api.v1.core.embeddings import embed_documents
+from src.api.v1.core.settings import settings
 from langchain_community.utilities import SQLDatabase
 
 logger = logging.getLogger(__name__)
 
 
- 
 # Connection management
- 
+
 
 def _get_connection() -> psycopg.Connection:
     """Open and return a new psycopg connection using the configured DSN.
@@ -48,8 +46,6 @@ def _get_connection() -> psycopg.Connection:
         psycopg.OperationalError : If the database is unreachable.
     """
     return psycopg.connect(settings.pg_connection_string, row_factory=dict_row)
-
-    
 
 
 @contextmanager
@@ -76,9 +72,8 @@ def get_db() -> Generator[psycopg.Connection, None, None]:
         conn.close()
 
 
- 
 # Document registration
- 
+
 
 def upsert_document(document_name: str, document_type: str) -> str:
     """Insert a new document record or return the existing one's UUID.
@@ -102,7 +97,9 @@ def upsert_document(document_name: str, document_type: str) -> str:
         ).fetchone()
 
         if row:
-            logger.info("Document already registered: %s → %s", document_name, row["id"])
+            logger.info(
+                "Document already registered: %s → %s", document_name, row["id"]
+            )
             return str(row["id"])
 
         doc_id = str(uuid.uuid4())
@@ -117,9 +114,8 @@ def upsert_document(document_name: str, document_type: str) -> str:
         return doc_id
 
 
- 
 # Chunk storage
- 
+
 
 def store_chunks(chunks: list[dict], doc_id: str) -> int:
     """Embed and store a list of deduplicated chunks into document_chunks.
@@ -149,11 +145,11 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
         logger.info("store_chunks: no chunks to store")
         return 0
 
-    #  Step 1: Batch embed all chunk texts 
+    #  Step 1: Batch embed all chunk texts
     texts = [c["content"] for c in chunks]
     embeddings = embed_documents(texts)
 
-    #  Step 2: Insert each chunk row 
+    #  Step 2: Insert each chunk row
     stored = 0
     with get_db() as conn:
         for chunk, embedding in zip(chunks, embeddings):
@@ -185,11 +181,11 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
                     doc_id,
                     chunk["chunk_hash"],
                     chunk["content"],
-                    json.dumps(embedding),          # cast to vector in SQL
+                    json.dumps(embedding),  # cast to vector in SQL
                     chunk.get("content_type"),
                     meta.get("page_number"),
                     meta.get("section"),
-                    json.dumps(meta),               # full metadata as JSONB
+                    json.dumps(meta),  # full metadata as JSONB
                     json.dumps(meta.get("position")) if meta.get("position") else None,
                 ),
             )
@@ -199,9 +195,8 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
     return stored
 
 
- 
 # Deduplication support
- 
+
 
 def get_existing_hashes() -> set[str]:
     """Fetch all chunk_hash values currently stored in document_chunks.
@@ -222,9 +217,8 @@ def get_existing_hashes() -> set[str]:
     return hashes
 
 
- 
 # Conversation storage
- 
+
 
 def get_or_create_conversation(session_id: str) -> str:
     """Return the conversation UUID for a session, creating it if needed.
@@ -253,7 +247,9 @@ def get_or_create_conversation(session_id: str) -> str:
             "INSERT INTO conversations (id, session_id) VALUES (%s, %s)",
             (conversation_id, session_id),
         )
-        logger.info("Created conversation %s for session %s", conversation_id, session_id)
+        logger.info(
+            "Created conversation %s for session %s", conversation_id, session_id
+        )
         return conversation_id
 
 
@@ -303,9 +299,8 @@ def get_conversation_messages(conversation_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
- 
 # Health check
- 
+
 
 def check_db_connection() -> bool:
     """Verify the database is reachable by running a lightweight query.
@@ -320,11 +315,10 @@ def check_db_connection() -> bool:
     except Exception as exc:
         logger.error("DB health check failed: %s", exc)
         return False
-    
 
- 
+
 # Conversation listing and deletion (used by API endpoints)
- 
+
 
 def list_conversations() -> list[dict]:
     """Return all conversations with a first-message preview and timestamp.
@@ -375,7 +369,6 @@ def delete_conversation(session_id: str) -> None:
         )
     logger.info("Deleted conversation for session_id=%s", session_id)
 
+
 def get_sql_database() -> SQLDatabase:
-    return SQLDatabase.from_uri(
-        settings.cc_db_connection_string
-    )
+    return SQLDatabase.from_uri(settings.cc_db_connection_string)

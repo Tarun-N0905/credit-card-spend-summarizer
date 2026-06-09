@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from src.api.v1.router import router as v1_router
+from src.api.v1.routes.router import router as v1_router
 
 app = FastAPI(
     title="Credit Card Spend Summarizer",

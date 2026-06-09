@@ -1,4 +1,3 @@
-
 """
 src/ingestion/deduplication.py
 
@@ -21,7 +20,7 @@ import hashlib
 import logging
 import re
 
-from src.core.db import get_existing_hashes
+from src.api.v1.core.db import get_existing_hashes
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +106,5 @@ def deduplicate_chunks(chunks: list[dict]) -> tuple[list[dict], int]:
         # it directly to the chunk_hash column without recomputing it.
         unique_chunks.append({**chunk, "chunk_hash": chunk_hash})
 
-    logger.info(
-        "Deduplication: %d unique, %d skipped", len(unique_chunks), skipped
-    )
+    logger.info("Deduplication: %d unique, %d skipped", len(unique_chunks), skipped)
     return unique_chunks, skipped

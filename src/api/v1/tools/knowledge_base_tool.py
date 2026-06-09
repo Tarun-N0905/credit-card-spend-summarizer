@@ -1,6 +1,6 @@
 import logging
 from langchain_core.tools import tool
-from src.services.rag_service import retrieve, format_context
+from src.api.v1.services.rag_service import retrieve, format_context
 
 logger = logging.getLogger(__name__)
 
