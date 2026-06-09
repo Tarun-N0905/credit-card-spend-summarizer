@@ -28,7 +28,8 @@ Key design decisions
 
 import json
 import re
-from typing import TypedDict, Optional
+import operator
+from typing import Annotated, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -190,7 +191,9 @@ class AgentState(TypedDict):
     session_id: str
     conversation_history: Optional[list]
     route: Optional[str]
-    messages: Optional[list]  # LangGraph ToolNode reads/writes this
+    messages: Annotated[
+        list, operator.add
+    ]  # LangGraph ToolNode reads/writes this; operator.add merges across nodes
     chunks: Optional[list]  # raw RetrievedChunk objects for image extraction
     kb_context: Optional[str]  # formatted string passed to response LLM
     sql_executed: Optional[str]
@@ -318,42 +321,6 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
     return sql_summary, all_rows
 
 
-def _run_kb_agent(query: str) -> tuple[str, list]:
-    """
-    Let the LLM choose between hybrid_search_tool and vector_search_tool,
-    call the retrieval function directly, and return
-    (formatted_context_string, raw_chunks_for_image_extraction).
-
-    Used by both_node. The knowledge_base route uses kb_agent_node +
-    graph ToolNode instead.
-    """
-    kb_llm = _get_kb_agent_llm()
-    messages = [HumanMessage(content=query)]
-    ai_msg: AIMessage = kb_llm.invoke(messages)
-
-    tool_calls = getattr(ai_msg, "tool_calls", None) or []
-    if not tool_calls:
-        print("[_run_kb_agent] LLM made no tool call; falling back to hybrid retrieval")
-        chunks = hybrid_retrieve(query, top_k=5)
-        return format_context(chunks), chunks
-
-    tool_name = tool_calls[0].get("name", "")
-    print(f"[_run_kb_agent] LLM selected tool: {tool_name!r}")
-
-    try:
-        if tool_name == "vector_search_tool":
-            raw_chunks = search_semantic(query, top_k=5, rerank=True)
-        else:
-            raw_chunks = hybrid_retrieve(query, top_k=5)
-    except Exception:
-        raw_chunks = []
-
-    context_str = (
-        format_context(raw_chunks) if raw_chunks else "No relevant documents found."
-    )
-    return context_str, raw_chunks
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Node 0 — History Loader
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,7 +394,7 @@ def kb_agent_node(state: AgentState) -> AgentState:
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
             print("[kb_agent_node] no tool call; falling back to hybrid retrieval")
-            chunks = hybrid_retrieve(state["query"], top_k=5)
+            chunks = search_hybrid(state["query"], top_k=5)
             return {
                 **state,
                 "messages": [human_msg, ai_msg],
@@ -564,101 +531,7 @@ def general_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 5 — Both  (SQL agent + KB agent, then merge in response_node)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _extract_sql_facts(rows: list) -> str:
-    """Pull key account facts from SQL rows to enrich the KB context string."""
-    if not rows:
-        return ""
-    facts = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        for key, label in [
-            ("card_variant", "Card variant"),
-            ("card_id", "Card ID"),
-            ("full_name", "Customer name"),
-            ("billing_month", "Billing month"),
-            ("total_purchases", "Total spend"),
-            ("reward_pts_earned", "Reward points earned"),
-            ("reward_points", "Current reward balance"),
-        ]:
-            if row.get(key) is not None:
-                facts.append(f"{label}: {row[key]}")
-    if not facts:
-        return ""
-    return "\n[Account facts from live data]\n" + "\n".join(dict.fromkeys(facts)) + "\n"
-
-
-def both_node(state: AgentState) -> AgentState:
-    """
-    Run SQL agent first (LLM-selected tool), then KB retrieval
-    (LLM-selected tool), and store both results for response_node to
-    merge into a single answer.
-
-    SQL is executed directly here (not via graph ToolNode) so we can
-    inspect the rows immediately for _extract_sql_facts before handing
-    off to the KB path.
-    """
-    history = state.get("conversation_history") or []
-    enriched = _enrich_query(state["query"], history)
-
-    # 1. SQL — LLM-driven tool selection, executed directly
-    sql_llm = _get_sql_agent_llm()
-    history_text = _format_history(history)
-    human_msg = HumanMessage(
-        content=SQL_AGENT_PROMPT_TEMPLATE.format_messages(
-            query=enriched,
-            history=history_text,
-        )[-1].content
-    )
-    ai_msg: AIMessage = sql_llm.invoke([human_msg])
-    tool_calls = getattr(ai_msg, "tool_calls", None) or []
-
-    sql, rows = "", []
-    if tool_calls:
-        tool_name = tool_calls[0].get("name", "")
-        tool_args = tool_calls[0].get("args", {})
-        print(f"[both_node] SQL agent selected tool: {tool_name!r}")
-        try:
-            if tool_name == "nl2sql_execute_multi":
-                sql_a, rows_a = _run_nl2sql(tool_args.get("question_a", enriched))
-                sql_b, rows_b = _run_nl2sql(tool_args.get("question_b", ""))
-                sql = f"{sql_a}\n\n{sql_b}".strip()
-                rows = rows_a + rows_b
-            else:
-                sql, rows = _run_nl2sql(tool_args.get("question", enriched))
-        except Exception as e:
-            print(f"[both_node] SQL tool execution failed: {e}")
-    else:
-        print("[both_node] SQL agent made no tool call; falling back to direct NL2SQL")
-        sql, rows = _run_nl2sql(enriched)
-
-    sql_facts = _extract_sql_facts(rows)
-
-    # 2. KB — LLM chooses vector vs hybrid
-    try:
-        kb_context, raw_chunks = _run_kb_agent(state["query"])
-        print(f"[both_node] kb: {len(raw_chunks)} raw chunks")
-    except Exception as e:
-        print(f"[both_node] kb failed: {e}")
-        kb_context, raw_chunks = "No relevant documents found.", []
-
-    return {
-        **state,
-        "chunks": raw_chunks,
-        "kb_context": kb_context,
-        "sql_executed": sql,
-        "sql_results": rows,
-        "sql_facts": sql_facts,
-        "sql_queries_run": [s for s in sql.split("\n\n") if s] if sql else [],
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 6 — Response
+# Node 5 — Response
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -777,15 +650,54 @@ def response_node(state: AgentState) -> AgentState:
 
         # ── Both path ─────────────────────────────────────────────────────────
         if route == "both":
+            messages = state.get("messages") or []
+
+            # Build tool_call_id → tool_name from all AIMessages.
+            # Safer than relying on ToolMessage.name which may be None
+            # depending on LangChain version.
+            kb_tool_names = {"hybrid_search_tool", "vector_search_tool"}
+            sql_tool_names = {"nl2sql_execute", "nl2sql_execute_multi"}
+
+            call_id_to_tool: dict[str, str] = {}
+            for m in messages:
+                if isinstance(m, AIMessage):
+                    for tc in getattr(m, "tool_calls", None) or []:
+                        call_id_to_tool[tc["id"]] = tc["name"]
+
+            kb_tool_msgs, sql_tool_msgs = [], []
+            for m in messages:
+                if not isinstance(m, ToolMessage):
+                    continue
+                tool_name = call_id_to_tool.get(m.tool_call_id, "") or m.name or ""
+                if tool_name in kb_tool_names:
+                    kb_tool_msgs.append(m)
+                elif tool_name in sql_tool_names:
+                    sql_tool_msgs.append(m)
+
+            print(
+                f"[response_node/both] kb_tool_msgs={len(kb_tool_msgs)} "
+                f"sql_tool_msgs={len(sql_tool_msgs)}"
+            )
+
+            # KB context from ToolMessages, fallback to state
+            kb_context = (
+                "\n\n".join(m.content for m in kb_tool_msgs)
+                or state.get("kb_context")
+                or "No relevant documents found."
+            )
+
+            # SQL — parse from ToolMessages, fallback to state
+            sql_executed, sql_results = _parse_sql_tool_messages(sql_tool_msgs)
+            if not sql_executed:
+                sql_executed = state.get("sql_executed") or ""
+                sql_results = state.get("sql_results") or []
+
             chunks = state.get("chunks") or []
-            kb_context = state.get("kb_context") or "No relevant documents found."
-            sql_results = state.get("sql_results") or []
             sql_json = (
                 json.dumps(sql_results, indent=2, default=str)
                 if sql_results
                 else "No account data found."
             )
-            sql_executed = state.get("sql_executed", "")
 
             data_sources, page_numbers, doc_names = [], [], []
             for chunk in chunks:
