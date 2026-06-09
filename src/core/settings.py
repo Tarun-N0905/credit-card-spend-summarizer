@@ -32,16 +32,16 @@ class Settings(BaseSettings):
         extra="ignore",          # ignore unrecognised env vars silently
     )
 
-    # ── PostgreSQL ────────────────────────────────────────────────────────
+    #   PostgreSQL  
     pg_connection_string: str
 
-    # ── OpenAI ────────────────────────────────────────────────────────────
+    #   OpenAI   
     openai_api_key: str
     openai_chat_model: str = "gpt-5.4"
     openai_vision_model: str = "gpt-4o"
     openai_embeddings_model: str = "text-embedding-3-small"
 
-    # ── LangSmith (optional — tracing only) ───────────────────────────────
+    #   LangSmith (optional — tracing only)         
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""

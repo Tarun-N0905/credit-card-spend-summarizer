@@ -167,7 +167,7 @@ def delete_conversation(session_id: str) -> bool:
         return False
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+#  Internal helpers 
 
 def _format_ts(iso_str: str) -> str:
     """

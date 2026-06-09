@@ -10,7 +10,7 @@ Graph flow:
                            └→ general                        → END
 
 Key design decisions
-────────────────────
+ ──────────────────
 1.  KB retrieval is fully LLM-driven.
     A bound-tool LLM (kb_agent_llm) decides per-query whether to call
     `hybrid_search_tool` (hybrid: vector + FTS + rerank) or
@@ -53,9 +53,9 @@ from src.core.db import (
     get_conversation_messages,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # KB Retrieval tools — LLM picks one per KB query
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 @tool
@@ -100,9 +100,9 @@ def vector_search_tool(query: str) -> str:
 KB_TOOLS = [hybrid_search_tool, vector_search_tool]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # SQL tools — LLM picks one per SQL query
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
@@ -179,9 +179,9 @@ def nl2sql_execute_multi(question_a: str, question_b: str) -> str:
 SQL_TOOLS = [nl2sql_execute, nl2sql_execute_multi]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # State
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 class AgentState(TypedDict):
@@ -199,9 +199,9 @@ class AgentState(TypedDict):
     response: Optional[object]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def _get_llm() -> ChatOpenAI:
@@ -353,9 +353,9 @@ def _run_kb_agent(query: str) -> tuple[str, list]:
     return context_str, raw_chunks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 0 — History Loader
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def history_loader_node(state: AgentState) -> AgentState:
@@ -372,9 +372,9 @@ def history_loader_node(state: AgentState) -> AgentState:
         return {**state, "conversation_history": []}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 1 — Router
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def router_node(state: AgentState) -> AgentState:
@@ -404,9 +404,9 @@ def router_node(state: AgentState) -> AgentState:
         return {**state, "route": "general"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 2 — KB Agent  (LLM picks vector vs hybrid via tool call)
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def kb_agent_node(state: AgentState) -> AgentState:
@@ -448,9 +448,9 @@ def kb_agent_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 3 — SQL Agent  (LLM picks single vs multi query via tool call)
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def sql_agent_node(state: AgentState) -> AgentState:
@@ -512,9 +512,9 @@ def sql_agent_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 4 — General (catch-all)
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def general_node(state: AgentState) -> AgentState:
@@ -562,9 +562,9 @@ def general_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 5 — Both  (SQL agent + KB agent, then merge in response_node)
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def _extract_sql_facts(rows: list) -> str:
@@ -656,9 +656,9 @@ def both_node(state: AgentState) -> AgentState:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 # Node 6 — Response
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 
 def response_node(state: AgentState) -> AgentState:
@@ -676,7 +676,7 @@ def response_node(state: AgentState) -> AgentState:
         route = state.get("route", "knowledge_base")
         history_text = _format_history(state.get("conversation_history") or [])
 
-        # ── KB-only path ─────────────────────────────────────────────────────
+        #   KB-only path  
         if route == "knowledge_base":
             kb_context = state.get("kb_context")
             if not kb_context:
@@ -739,7 +739,7 @@ def response_node(state: AgentState) -> AgentState:
             )
             return {**state, "response": response}
 
-        # ── SQL-only path ─────────────────────────────────────────────────────
+        #   SQL-only path  
         if route == "sql_query":
             # Prefer state values set by fallback in sql_agent_node.
             # If the tool loop ran, read from ToolMessages instead.
@@ -774,7 +774,7 @@ def response_node(state: AgentState) -> AgentState:
             print("[response_node/sql] answer generated")
             return {**state, "response": response}
 
-        # ── Both path ─────────────────────────────────────────────────────────
+        #   Both path    
         if route == "both":
             chunks = state.get("chunks") or []
             kb_context = state.get("kb_context") or "No relevant documents found."
@@ -833,7 +833,7 @@ def response_node(state: AgentState) -> AgentState:
             print(f"[response_node/both] merged answer — {len(image_paths)} image(s)")
             return {**state, "response": response}
 
-        # ── Unexpected route — safe fallback ──────────────────────────────────
+        #   Unexpected route — safe fallback                  
         raise ValueError(f"response_node received unexpected route: {route!r}")
 
     except Exception as e:

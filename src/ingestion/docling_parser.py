@@ -38,9 +38,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
+ 
 # Constants
-# ---------------------------------------------------------------------------
+ 
 
 # Vision model used during ingestion to describe embedded images.
 # The chat model does not support vision, so a separate env var is used.
@@ -79,9 +79,9 @@ _TABLE_LABELS = {"table"}
 _IMAGE_LABELS = {"picture", "figure", "chart"}
 
 
-# ---------------------------------------------------------------------------
+ 
 # Image helpers
-# ---------------------------------------------------------------------------
+ 
 
 
 def _describe_image_with_vision_model(img_b64: str, page_no: int | None) -> str:
@@ -180,9 +180,9 @@ def _save_image_locally(
     return str(image_path)
 
 
-# ---------------------------------------------------------------------------
+ 
 # Table helper
-# ---------------------------------------------------------------------------
+ 
 
 
 def _table_to_text(node, doc) -> str:
@@ -256,9 +256,9 @@ def _table_to_text(node, doc) -> str:
     return getattr(node, "text", "") or ""
 
 
-# ---------------------------------------------------------------------------
+ 
 # Text chunking helper
-# ---------------------------------------------------------------------------
+ 
 
 
 def _split_text(text: str) -> list[str]:
@@ -286,9 +286,9 @@ def _split_text(text: str) -> list[str]:
     return splitter.split_text(text)
 
 
-# ---------------------------------------------------------------------------
+ 
 # Public API
-# ---------------------------------------------------------------------------
+ 
 
 
 def parse_document(file_path: str) -> list[dict]:
@@ -316,7 +316,7 @@ def parse_document(file_path: str) -> list[dict]:
         List of chunk dicts ready for deduplication, embedding, and storage.
     """
 
-    # ── Step 1: Configure Docling pipeline ───────────────────────────────
+    #   Step 1: Configure Docling pipeline  
     # do_ocr=True             — run OCR on scanned/rasterised pages
     # do_table_structure=True — detect table grid and reconstruct rows/cols
     # generate_picture_images — render each picture element to a PIL Image
@@ -336,7 +336,7 @@ def parse_document(file_path: str) -> list[dict]:
         },
     )
 
-    # ── Step 2: Convert the PDF ───────────────────────────────────────────
+    #   Step 2: Convert the PDF        
     result = converter.convert(file_path)
     doc = result.document
 
@@ -345,7 +345,7 @@ def parse_document(file_path: str) -> list[dict]:
     source_file = os.path.basename(file_path)
     image_counter = 0
 
-    # ── Step 3: Walk the document element tree ────────────────────────────
+    #   Step 3: Walk the document element tree     
     for item in doc.iterate_items():
         node, _ = item if isinstance(item, tuple) else (item, None)
 
@@ -379,14 +379,14 @@ def parse_document(file_path: str) -> list[dict]:
                 "position": snapshot_position,
             }
 
-        # ── Section headings & document title ─────────────────────────
+        #   Section headings & document title    
         if label in _HEADING_LABELS:
             text = getattr(node, "text", "").strip()
             if text:
                 current_section = text
             continue
 
-        # ── Tables ────────────────────────────────────────────────────
+        #   Tables   
         elif label in _TABLE_LABELS:
             table_text = _table_to_text(node, doc).strip()
             if table_text:
@@ -398,7 +398,7 @@ def parse_document(file_path: str) -> list[dict]:
                     }
                 )
 
-        # ── Pictures, figures, and charts ─────────────────────────────
+        #   Pictures, figures, and charts      
         elif any(img_label in label for img_label in _IMAGE_LABELS):
             image_counter += 1
             img_b64 = _extract_image_b64(node, doc)
@@ -425,7 +425,7 @@ def parse_document(file_path: str) -> list[dict]:
                 }
             )
 
-        # ── Plain text: paragraphs, list items, captions, footnotes ───
+        #   Plain text: paragraphs, list items, captions, footnotes  ─
         else:
             text = getattr(node, "text", "")
             if not text or not text.strip():
