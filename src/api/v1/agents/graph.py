@@ -25,6 +25,31 @@ run_credit_card_agent_stream() runs the full LangGraph pipeline synchronously
 (retrieval + SQL are fast I/O), then re-streams the final answer token-by-token
 using the same prompt templates as response_node. This keeps the graph simple
 and gives Streamlit real incremental output for the answer text.
+
+SSE token encoding
+──────────────────
+Every token yielded from chain.stream() is JSON-encoded before embedding in the
+SSE frame:
+
+    yield f"data: {json.dumps(token)}\\n\\n"
+
+This is necessary because LLM tokens can contain raw newlines, markdown symbols,
+or even the literal string "data: " — all of which break the SSE framing if
+written unescaped. JSON encoding produces a single-line, safely escaped string
+that the client decodes with json.loads() before appending to the answer buffer.
+
+Client-side parsing (Streamlit / JS):
+    if line.startswith("data: "):
+        payload = line[6:]
+        if payload == "[DONE]":
+            break
+        elif payload.startswith("[META]"):
+            metadata = json.loads(payload[7:])
+        elif payload.startswith("[ERROR]"):
+            handle_error(payload[7:])
+        else:
+            token = json.loads(payload)   # ← decode JSON string
+            answer += token
 """
 
 import json
@@ -281,13 +306,21 @@ def run_credit_card_agent_stream(
     the final LLM answer token-by-token as plain text chunks.
 
     Yields a sequence of SSE-formatted strings:
-      data: <token>\\n\\n          — answer text chunks
-      data: [DONE]\\n\\n           — signals end of answer text
-      data: [META] <json>\\n\\n   — final metadata (route, page_no, etc.)
-      data: [ERROR] <msg>\\n\\n   — on failure
+      data: <json-encoded-token>\\n\\n  — answer text chunks (JSON string, decode with json.loads)
+      data: [DONE]\\n\\n                — signals end of answer text
+      data: [META] <json>\\n\\n        — final metadata (route, page_no, etc.)
+      data: [ERROR] <msg>\\n\\n        — on failure
 
-    The Streamlit client should accumulate text chunks and parse [META] at the
-    end to display sources / SQL info.
+    IMPORTANT — client-side decoding:
+        payload = line[6:]               # strip "data: " prefix
+        if payload == "[DONE]": ...
+        elif payload.startswith("[META]"): metadata = json.loads(payload[7:])
+        elif payload.startswith("[ERROR]"): ...
+        else: token = json.loads(payload)   # ← must json.loads every token
+              answer += token
+
+    Tokens are JSON-encoded so that newlines, markdown, and any other special
+    characters inside the LLM output cannot break the SSE framing.
     """
     initial_state: AgentState = {
         "query": query,
@@ -312,18 +345,23 @@ def run_credit_card_agent_stream(
         route = final_state.get("route", "unknown")
         print(f"[stream] graph done, route={route}")
 
-        # Step 2 — rebuild the prompt and stream the answer
+        # Step 2 — rebuild the prompt and stream the answer.
+        # FIX: tokens are JSON-encoded before embedding in the SSE frame so
+        # that any newlines or special characters in the token cannot split or
+        # corrupt the SSE message boundary.
         chain, inputs, metadata = _build_stream_prompt(final_state)
 
         for chunk in chain.stream(inputs):
             token = chunk.content if hasattr(chunk, "content") else str(chunk)
             if token:
-                yield f"data: {token}\n\n"
+                # json.dumps produces a quoted, single-line, safely escaped
+                # string — e.g. "Hello\nworld" becomes "\"Hello\\nworld\""
+                yield f"data: {json.dumps(token)}\n\n"
 
         yield "data: [DONE]\n\n"
 
         # Step 3 — emit metadata so the client can show sources etc.
-        # Enrich image_paths from final_state if available
+        # Enrich image_paths from final_state if available.
         response_obj = final_state.get("response")
         if response_obj is not None:
             if hasattr(response_obj, "model_dump"):

@@ -25,6 +25,7 @@ dependencies = [
     "langchain-community>=0.4.2",
     "cohere>=7.0.3",
     "mistune>=3.2.1",
+    "markdown>=3.10.2",
 ]
 
 [build-system]

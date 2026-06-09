@@ -13,6 +13,7 @@ Imported by:
   - ui/components/list_view.py
 """
 
+import json
 import streamlit as st
 import requests
 
@@ -90,7 +91,7 @@ def load_conversation_messages(session_id: str) -> bool:
 
 def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
     """
-    POST the user message to FastAPI POST /api/v1/chat.
+    POST the user message to FastAPI POST /api/v1/chat (non-streaming fallback).
 
     Passes session_id so the backend can persist the message to the
     correct conversation via get_or_create_conversation().
@@ -134,6 +135,84 @@ def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
             "⚠ Service temporarily unavailable. Please try again later."
         )
         return None, []
+
+
+def stream_chat_message(user_input: str):
+    """
+    POST to POST /api/v1/chat/stream and yield tokens as they arrive via SSE.
+
+    SSE event format from backend:
+      data: <token>          — incremental answer text
+      data: [DONE]           — stream complete
+      data: [META] <json>    — metadata: route_taken, image_paths, etc.
+      data: [ERROR] <msg>    — error message
+
+    Yields:
+        str tokens as they arrive.
+
+    Side-effects:
+        - Sets st.session_state.stream_image_paths after [META] is received.
+        - Sets st.session_state.error on [ERROR] or connection failure.
+
+    Args:
+        user_input : The user's message text.
+    """
+    st.session_state.stream_image_paths = []
+
+    try:
+        with requests.post(
+            f"{API_BASE_URL}/chat/stream",
+            json={
+                "session_id": st.session_state.session_id,
+                "message": user_input,
+            },
+            timeout=120,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line or not raw_line.startswith("data: "):
+                    continue
+
+                payload = raw_line[len("data: ") :]
+
+                if payload == "[DONE]":
+                    return
+
+                if payload.startswith("[ERROR]"):
+                    msg = payload[len("[ERROR]") :].strip()
+                    st.session_state.error = f"⚠ {msg}"
+                    return
+
+                if payload.startswith("[META]"):
+                    try:
+                        meta = json.loads(payload[len("[META]") :].strip())
+                        st.session_state.stream_image_paths = (
+                            meta.get("image_paths") or []
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                # Regular token — decode JSON string before yielding.
+                # Tokens are JSON-encoded on the server side so that newlines
+                # and special characters cannot break SSE framing.
+                try:
+                    yield json.loads(payload)
+                except Exception:
+                    yield payload
+
+    except requests.exceptions.ConnectionError:
+        st.session_state.error = (
+            "⚠ Service temporarily unavailable. Please try again later."
+        )
+    except requests.exceptions.Timeout:
+        st.session_state.error = "⚠ The request timed out. Please try again."
+    except Exception:
+        st.session_state.error = (
+            "⚠ Service temporarily unavailable. Please try again later."
+        )
 
 
 def delete_conversation(session_id: str) -> bool:

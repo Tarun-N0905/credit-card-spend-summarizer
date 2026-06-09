@@ -23,7 +23,7 @@ from components.chat import (
     render_input_bar,
 )
 
-#  Page config  
+#  Page config
 
 st.set_page_config(
     page_title="Credit Spend Summarizer",
@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-#  Global CSS  
+#  Global CSS
 
 st.markdown(
     """
@@ -389,13 +389,72 @@ button[kind="secondary"]:hover, .cs-back-btn button:hover {
     0%, 80%, 100% { transform: translateY(0); }
     40%           { transform: translateY(-5px); }
 }
+
+/* ───────── Markdown rendering fixes ───────── */
+
+.cs-md-bubble {
+    overflow-x: auto;
+}
+
+.cs-md-bubble table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.75rem 0;
+    font-size: 0.85rem;
+}
+
+.cs-md-bubble th,
+.cs-md-bubble td {
+    border: 1px solid #3e3e42;
+    padding: 8px 12px;
+    text-align: left;
+}
+
+.cs-md-bubble th {
+    background: #2d2d2d;
+    font-weight: 600;
+}
+
+.cs-md-bubble tr:nth-child(even) {
+    background: #2a2d2a;
+}
+
+.cs-md-bubble pre {
+    overflow-x: auto;
+    padding: 12px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 2px;
+}
+
+.cs-md-bubble blockquote {
+    border-left: 3px solid #007acc;
+    margin: 0.75rem 0;
+    padding-left: 12px;
+    color: #bbbbbb;
+}
+
+.cs-md-bubble h1,
+.cs-md-bubble h2,
+.cs-md-bubble h3,
+.cs-md-bubble h4,
+.cs-md-bubble h5,
+.cs-md-bubble h6 {
+    margin-top: 0.8rem;
+    margin-bottom: 0.5rem;
+}
+
+.cs-md-bubble p + table {
+    margin-top: 0.75rem;
+}
+
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-#  Main  
+#  Main
 
 
 def main() -> None:
