@@ -1,16 +1,3 @@
-"""
-src/core/embeddings.py
-
-Thin wrapper around OpenAI's text-embedding-3-small model.
-
-All embedding calls go through this module so the model name and batching
-logic live in one place. Callers pass a list of strings and get back a
-list of float vectors — no OpenAI SDK details leak outside this file.
-
-Vector dimension: 1536  (fixed for text-embedding-3-small)
-This must match the VECTOR(1536) column in document_chunks.
-"""
-
 import logging
 
 from langchain_openai import OpenAIEmbeddings
@@ -19,11 +6,7 @@ from src.api.v1.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# OpenAI enforces a max of 2048 inputs per embed request.
-# We use 512 as the batch size — large enough to be efficient, small enough
-# to stay well under the limit and keep memory usage predictable.
-# ---------------------------------------------------------------------------
+
 _BATCH_SIZE = 512
 
 # Singleton embeddings client — instantiated once, reused across calls.
@@ -53,20 +36,6 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
     embeddings API once per batch. Results are concatenated and returned
     in the same order as the input list.
 
-    Batching is important during ingestion — embedding one chunk at a time
-    is slow and wastes API round trips. A single large request would hit
-    the 2048-input limit, so we window it ourselves.
-
-    Args:
-        texts : List of strings to embed. Must be non-empty.
-
-    Returns:
-        List of 1536-dimensional float vectors, one per input string,
-        in the same order as the input.
-
-    Raises:
-        ValueError : If texts is empty.
-        Exception  : Propagates OpenAI API errors to the caller.
     """
     if not texts:
         raise ValueError("embed_documents requires at least one text string")

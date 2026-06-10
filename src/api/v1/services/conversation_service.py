@@ -1,20 +1,3 @@
-"""
-src/services/conversation_service.py
-
-Thin wrapper around the conversations + messages tables in credit_multimodel_rag.
-These tables are defined in schema.sql (the RAG database).
-
-Schema:
-    conversations  (id UUID PK, session_id VARCHAR UNIQUE, created_at)
-    messages       (id UUID PK, conversation_id UUID FK, role VARCHAR,
-                    content TEXT, created_at TIMESTAMP)
-
-Used by nodes.py to:
-    1. get_or_create_conversation(session_id) → conversation UUID
-    2. load_recent_messages(conv_id, limit)   → list[{role, content}]
-    3. save_message(conv_id, role, content)   → None
-"""
-
 import logging
 from uuid import UUID
 

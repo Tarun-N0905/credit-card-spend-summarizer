@@ -1,10 +1,3 @@
-"""
-src/agents/schemas.py
-
-Response data models for the credit card agent.
-Aligned with the Capstone BFSI-CC-003 API specification.
-"""
-
 from pydantic import BaseModel, Field
 from typing import Optional, List, Union
 

@@ -1,10 +1,3 @@
-"""
-src/api/v1/tools/sql_tools.py
-
-SQL execution tools for the Credit Card Spend Summarizer.
-The SQL agent LLM (bound via bind_tools) picks one of these per query.
-"""
-
 import json
 import re
 

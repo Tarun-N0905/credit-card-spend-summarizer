@@ -1,18 +1,3 @@
-"""
-src/ingestion/ingestion.py
-
-Section-aware chunking for multimodal RAG.
-
-Design goals
-------------
-- Preserve semantic structure.
-- Keep tables atomic.
-- Keep images atomic.
-- Chunk text by paragraphs, not raw characters.
-- Maintain section context by repeating headings.
-- Use 500-char chunks with 70-char overlap.
-"""
-
 import logging
 import pathlib
 import sys
