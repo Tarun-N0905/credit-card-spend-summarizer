@@ -14,7 +14,7 @@ _COOKING_MESSAGES = [
     "🍳 Cooking your response…",
 ]
 
-# ── Chat controls ────────────────────────────────────────────────────────────
+#  Chat controls 
 
 
 def render_chat_controls() -> None:
@@ -45,7 +45,7 @@ def render_chat_controls() -> None:
     )
 
 
-# ── Message renders ───────────────────────────────────────────────────────────
+#  Message renders 
 
 
 def render_message(role: str, content: str, timestamp: str) -> None:
@@ -133,7 +133,7 @@ def render_conversation() -> None:
         st.session_state._stream_placeholder = st.empty()
 
 
-# ── Streaming helpers ─────────────────────────────────────────────────────────
+#  Streaming helpers 
 
 
 def _status_bubble_html(status_text: str) -> str:
@@ -286,7 +286,7 @@ def _assistant_bubble_components_html(content: str) -> None:
     )
 
 
-# ── Input bar ─────────────────────────────────────────────────────────────────
+#  Input bar 
 
 
 def render_input_bar() -> None:
@@ -311,7 +311,7 @@ def render_input_bar() -> None:
     if "input_reset_counter" not in st.session_state:
         st.session_state.input_reset_counter = 0
 
-    # ── Delete confirmation overlay ──────────────────────────────────────
+    #  Delete confirmation overlay 
     if st.session_state.confirm_delete:
         st.markdown(
             '<div class="cs-confirm">Are you sure you want to delete this chat? This cannot be undone.</div>',
@@ -330,7 +330,7 @@ def render_input_bar() -> None:
                 st.rerun()
         return
 
-    # ── Input row ────────────────────────────────────────────────────────
+    #  Input row 
     col_back, col_input, col_send = st.columns([1, 7, 1])
 
     with col_back:
@@ -349,7 +349,7 @@ def render_input_bar() -> None:
     with col_send:
         send_clicked = st.button("Send", key="send_btn")
 
-    # ── Step 1: capture new message ──────────────────────────────────────
+    #  Step 1: capture new message 
     if send_clicked and user_input.strip():
         clear_error()
         add_message("user", user_input.strip())
@@ -358,7 +358,7 @@ def render_input_bar() -> None:
         st.session_state.input_reset_counter += 1
         st.rerun()
 
-    # ── Step 2: stream the assistant response ────────────────────────────
+    #  Step 2: stream the assistant response 
     if st.session_state.is_loading:
         user_msg = st.session_state.get("pending_user_message", "")
 
@@ -419,7 +419,7 @@ def render_input_bar() -> None:
                 unsafe_allow_html=True,
             )
 
-        # ── Step 3: persist raw markdown and rerun ───────────────────────
+        #  Step 3: persist raw markdown and rerun 
         # Store the raw accumulated text (not HTML) so render_message()
         # can convert it correctly on every future rerun.
         full_reply = "".join(accumulated).strip()
