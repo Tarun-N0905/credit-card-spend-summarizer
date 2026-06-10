@@ -166,7 +166,17 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
     }
 
     try:
-        final_state = credit_card_agent.invoke(initial_state)
+        final_state = credit_card_agent.invoke(
+            initial_state,
+            config={
+                "run_name": "credit_card_agent",
+                "metadata": {
+                    "session_id": session_id,
+                    "query": query,
+                    "mode": "sync",
+                },
+            },
+        )
 
         response = final_state.get("response")
         if response is None:
@@ -189,9 +199,9 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Streaming support
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def _build_stream_prompt(final_state: AgentState):
@@ -341,7 +351,17 @@ def run_credit_card_agent_stream(
         # Step 1 — run the full graph (retrieval/SQL happen here)
         # response_node still builds an AgentResponse on state, but we ignore
         # its answer text; we re-stream below using the same prompt + inputs.
-        final_state = credit_card_agent.invoke(initial_state)
+        final_state = credit_card_agent.invoke(
+            initial_state,
+            config={
+                "run_name": "credit_card_agent_stream",
+                "metadata": {
+                    "session_id": session_id,
+                    "query": query,
+                    "mode": "stream",
+                },
+            },
+        )
         route = final_state.get("route", "unknown")
         print(f"[stream] graph done, route={route}")
 

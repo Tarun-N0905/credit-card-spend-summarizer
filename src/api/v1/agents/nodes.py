@@ -55,9 +55,9 @@ from src.api.v1.core.db import (
     get_conversation_messages,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # KB Retrieval tools — LLM picks one per KB query
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 @tool
@@ -102,9 +102,9 @@ def vector_search_tool(query: str) -> str:
 KB_TOOLS = [hybrid_search_tool, vector_search_tool]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # SQL tools — LLM picks one per SQL query
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
@@ -113,7 +113,16 @@ def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
     Returns (sql_string, rows_list).  Never raises — returns ("", []) on error.
     """
     try:
-        result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched_query})
+        result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke(
+            {"query": enriched_query},
+            config={
+                "run_name": "nl2sql",
+                "metadata": {
+                    "node": "_run_nl2sql",
+                    "query": enriched_query,
+                },
+            },
+        )
         sql = result.content.strip()
         sql = re.sub(r"^```(?:sql)?\s*", "", sql)
         sql = re.sub(r"\s*```$", "", sql).strip()
@@ -181,9 +190,9 @@ def nl2sql_execute_multi(question_a: str, question_b: str) -> str:
 SQL_TOOLS = [nl2sql_execute, nl2sql_execute_multi]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # State
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 class AgentState(TypedDict):
@@ -203,9 +212,9 @@ class AgentState(TypedDict):
     response: Optional[object]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def _get_llm() -> ChatOpenAI:
@@ -321,9 +330,9 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
     return sql_summary, all_rows
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 0 — History Loader
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def history_loader_node(state: AgentState) -> AgentState:
@@ -340,9 +349,9 @@ def history_loader_node(state: AgentState) -> AgentState:
         return {**state, "conversation_history": []}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 1 — Router
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def router_node(state: AgentState) -> AgentState:
@@ -350,7 +359,17 @@ def router_node(state: AgentState) -> AgentState:
     try:
         history = state.get("conversation_history") or []
         enriched = _enrich_query(state["query"], history)
-        result = (ROUTER_PROMPT_TEMPLATE | _get_llm()).invoke({"query": enriched})
+        result = (ROUTER_PROMPT_TEMPLATE | _get_llm()).invoke(
+            {"query": enriched},
+            config={
+                "run_name": "router",
+                "metadata": {
+                    "node": "router_node",
+                    "session_id": state.get("session_id", ""),
+                    "query": state["query"],
+                },
+            },
+        )
         route = result.content.strip().lower()
 
         if "both" in route:
@@ -372,9 +391,9 @@ def router_node(state: AgentState) -> AgentState:
         return {**state, "route": "general"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 2 — KB Agent  (LLM picks vector vs hybrid via tool call)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def kb_agent_node(state: AgentState) -> AgentState:
@@ -389,7 +408,17 @@ def kb_agent_node(state: AgentState) -> AgentState:
     try:
         kb_llm = _get_kb_agent_llm()
         human_msg = HumanMessage(content=state["query"])
-        ai_msg: AIMessage = kb_llm.invoke([human_msg])
+        ai_msg: AIMessage = kb_llm.invoke(
+            [human_msg],
+            config={
+                "run_name": "kb_agent",
+                "metadata": {
+                    "node": "kb_agent_node",
+                    "session_id": state.get("session_id", ""),
+                    "query": state["query"],
+                },
+            },
+        )
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
@@ -416,9 +445,9 @@ def kb_agent_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 3 — SQL Agent  (LLM picks single vs multi query via tool call)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def sql_agent_node(state: AgentState) -> AgentState:
@@ -450,7 +479,18 @@ def sql_agent_node(state: AgentState) -> AgentState:
                 -1
             ].content  # extract rendered human turn content
         )
-        ai_msg: AIMessage = sql_llm.invoke([human_msg])
+        ai_msg: AIMessage = sql_llm.invoke(
+            [human_msg],
+            config={
+                "run_name": "sql_agent",
+                "metadata": {
+                    "node": "sql_agent_node",
+                    "session_id": state.get("session_id", ""),
+                    "query": state["query"],
+                    "route": state.get("route", ""),
+                },
+            },
+        )
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
@@ -480,9 +520,9 @@ def sql_agent_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 4 — General (catch-all)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def general_node(state: AgentState) -> AgentState:
@@ -496,7 +536,15 @@ def general_node(state: AgentState) -> AgentState:
             {
                 "query": state["query"],
                 "history": history_text,
-            }
+            },
+            config={
+                "run_name": "general",
+                "metadata": {
+                    "node": "general_node",
+                    "session_id": state.get("session_id", ""),
+                    "query": state["query"],
+                },
+            },
         )
         answer = result.content.strip()
 
@@ -530,9 +578,9 @@ def general_node(state: AgentState) -> AgentState:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Node 5 — Response
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def response_node(state: AgentState) -> AgentState:
@@ -550,7 +598,7 @@ def response_node(state: AgentState) -> AgentState:
         route = state.get("route", "knowledge_base")
         history_text = _format_history(state.get("conversation_history") or [])
 
-        # ── KB-only path ─────────────────────────────────────────────────────
+        #  KB-only path 
         if route == "knowledge_base":
             kb_context = state.get("kb_context")
             if not kb_context:
@@ -570,7 +618,16 @@ def response_node(state: AgentState) -> AgentState:
                     "query": state["query"],
                     "context": kb_context,
                     "history": history_text,
-                }
+                },
+                config={
+                    "run_name": "response_kb",
+                    "metadata": {
+                        "node": "response_node",
+                        "route": "knowledge_base",
+                        "session_id": state.get("session_id", ""),
+                        "query": state["query"],
+                    },
+                },
             )
             answer = result.content.strip()
 
@@ -613,7 +670,7 @@ def response_node(state: AgentState) -> AgentState:
             )
             return {**state, "response": response}
 
-        # ── SQL-only path ─────────────────────────────────────────────────────
+        #  SQL-only path 
         if route == "sql_query":
             # Prefer state values set by fallback in sql_agent_node.
             # If the tool loop ran, read from ToolMessages instead.
@@ -631,7 +688,17 @@ def response_node(state: AgentState) -> AgentState:
                     "sql_executed": sql_executed,
                     "sql_results": json.dumps(sql_results, indent=2, default=str),
                     "history": history_text,
-                }
+                },
+                config={
+                    "run_name": "response_sql",
+                    "metadata": {
+                        "node": "response_node",
+                        "route": "sql_query",
+                        "session_id": state.get("session_id", ""),
+                        "query": state["query"],
+                        "sql_executed": sql_executed,
+                    },
+                },
             )
             answer = result.content.strip()
 
@@ -648,7 +715,7 @@ def response_node(state: AgentState) -> AgentState:
             print("[response_node/sql] answer generated")
             return {**state, "response": response}
 
-        # ── Both path ─────────────────────────────────────────────────────────
+        #  Both path 
         if route == "both":
             messages = state.get("messages") or []
 
@@ -729,7 +796,17 @@ def response_node(state: AgentState) -> AgentState:
                     "kb_context": kb_context,
                     "sql_results": sql_json,
                     "history": history_text,
-                }
+                },
+                config={
+                    "run_name": "response_both",
+                    "metadata": {
+                        "node": "response_node",
+                        "route": "both",
+                        "session_id": state.get("session_id", ""),
+                        "query": state["query"],
+                        "sql_executed": sql_executed,
+                    },
+                },
             )
             answer = result.content.strip()
 
