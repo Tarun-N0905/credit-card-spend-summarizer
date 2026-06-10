@@ -130,6 +130,20 @@ def send_chat_message(user_input: str) -> tuple[str | None, list[str]]:
     except requests.exceptions.Timeout:
         st.session_state.error = "⚠ The request timed out. Please try again."
         return None, []
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 400:
+            try:
+                detail = exc.response.json().get("detail", "")
+            except Exception:
+                detail = ""
+            st.session_state.error = (
+                f"⚠ {detail}" if detail else "⚠ Your message could not be processed."
+            )
+        else:
+            st.session_state.error = (
+                "⚠ Service temporarily unavailable. Please try again later."
+            )
+        return None, []
     except Exception:
         st.session_state.error = (
             "⚠ Service temporarily unavailable. Please try again later."
@@ -209,6 +223,19 @@ def stream_chat_message(user_input: str):
         )
     except requests.exceptions.Timeout:
         st.session_state.error = "⚠ The request timed out. Please try again."
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 400:
+            try:
+                detail = exc.response.json().get("detail", "")
+            except Exception:
+                detail = ""
+            st.session_state.error = (
+                f"⚠ {detail}" if detail else "⚠ Your message could not be processed."
+            )
+        else:
+            st.session_state.error = (
+                "⚠ Service temporarily unavailable. Please try again later."
+            )
     except Exception:
         st.session_state.error = (
             "⚠ Service temporarily unavailable. Please try again later."

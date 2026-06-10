@@ -26,6 +26,7 @@ dependencies = [
     "cohere>=7.0.3",
     "mistune>=3.2.1",
     "markdown>=3.10.2",
+    "guardrails-ai>=0.10.2",
 ]
 
 [build-system]

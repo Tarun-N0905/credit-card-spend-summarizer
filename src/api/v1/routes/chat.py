@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import json
 from src.api.v1.core.db import get_or_create_conversation, save_message
 from src.api.v1.agents.graph import run_credit_card_agent, run_credit_card_agent_stream
+from src.api.v1.core.guardrails import GuardrailViolation, guard_input
 
 router = APIRouter()
 
@@ -30,6 +31,8 @@ def _extract_reply(agent_response: dict) -> str:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest):
     try:
+        guard_input(body.message)
+
         conversation_id = get_or_create_conversation(body.session_id)
         save_message(conversation_id, "user", body.message)
 
@@ -42,6 +45,9 @@ async def chat(body: ChatRequest):
         save_message(conversation_id, "assistant", reply)
         return {"reply": reply}
 
+    except GuardrailViolation as exc:
+        print(f"[chat] guardrail blocked: {exc.guard}")
+        return JSONResponse(status_code=400, content={"detail": exc.message})
     except Exception as exc:
         print(f"[chat] error: {exc}")
         return JSONResponse(status_code=500, content=_UNAVAILABLE)
@@ -83,6 +89,13 @@ async def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks):
     accumulated: list[str] = []
 
     def event_stream():
+        try:
+            guard_input(body.message)
+        except GuardrailViolation as exc:
+            print(f"[chat/stream] guardrail blocked: {exc.guard}")
+            yield f"data: [ERROR] {exc.message}\n\n"
+            return
+
         for chunk in run_credit_card_agent_stream(
             body.message, session_id=body.session_id
         ):

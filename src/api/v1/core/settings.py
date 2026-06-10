@@ -32,24 +32,30 @@ class Settings(BaseSettings):
         extra="ignore",          # ignore unrecognised env vars silently
     )
 
-    #   PostgreSQL  
+    #   PostgreSQL
     pg_connection_string: str
 
-    #   OpenAI   
+    #   OpenAI
     openai_api_key: str
     openai_chat_model: str = "gpt-5.4"
     openai_vision_model: str = "gpt-4o"
     openai_embeddings_model: str = "text-embedding-3-small"
 
-    #   LangSmith (optional — tracing only)         
+    #   LangSmith (optional — tracing only)
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""
     langsmith_project: str = "capstone"
-    # Cohere
+
+    #   Cohere
     cohere_api_key: str = ""
     cohere_rerank_model: str = "rerank-v3.5"
     cc_db_connection_string: str = ""
+
+    #   Guardrails AI
+    guardrails_api_key: str = ""
+    guardrail_toxicity_threshold: float = 0.5
+    guardrails_use_remote_inferencing: bool = False
 
 
 @lru_cache(maxsize=1)
