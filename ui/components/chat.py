@@ -1,35 +1,3 @@
-"""
-ui/components/chat.py
-
-All rendering for the chat view — controls bar, message bubbles,
-typing indicator, empty state, and the input bar.
-
-Streaming flow
-──────────────
-1. User submits → is_loading=True, pending_user_message set → rerun
-2. Next run: call stream_chat_message() generator.
-   • Before first token: show animated status bubble.
-   • After first token: render live markdown HTML on every token via
-     _md_to_html_safe(), giving a smooth typewriter effect with proper
-     formatting (tables, bold, code, etc.) visible from the first chunk.
-3. Stream done: persist raw markdown to session state, rerun to render
-   via render_conversation() as a normal bubble.
-
-Fix summary (vs previous version)
-──────────────────────────────────
-• REMOVED _streaming_text_html() — it used html.escape() which rendered
-  markdown syntax literally (raw **bold**, |table| etc.) instead of HTML.
-• REPLACED with _streaming_bubble_html() for ALL in-flight frames,
-  converting markdown on every token so the user sees formatted output
-  from the very first word.
-• Removed the redundant done=True finalize call before st.rerun() —
-  render_conversation() re-renders from session state anyway.
-• Session state always stores raw markdown; never pre-converted HTML.
-
-Imported by:
-  - ui/app.py
-"""
-
 import html
 import os
 import time
@@ -41,9 +9,9 @@ from api_client import stream_chat_message, delete_conversation
 
 # Rotating status messages shown while waiting for the first token
 _COOKING_MESSAGES = [
-    "🍳 Cooking your response…",
     "🔍 Scanning your statements…",
     "✨ Crunching the numbers…",
+    "🍳 Cooking your response…",
 ]
 
 # ── Chat controls ────────────────────────────────────────────────────────────
