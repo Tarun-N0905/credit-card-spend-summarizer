@@ -32,167 +32,27 @@ import operator
 from typing import Annotated, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from src.api.v1.core.settings import get_settings
 from src.api.v1.agents.prompts import (
     COMBINED_ANSWER_PROMPT_TEMPLATE,
     ROUTER_PROMPT_TEMPLATE,
     GENERAL_PROMPT_TEMPLATE,
-    NL2SQL_PROMPT_TEMPLATE,
     SQL_AGENT_PROMPT_TEMPLATE,
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
 )
 from src.api.v1.agents.schemas import AgentResponse
-from src.api.v1.services.rag_service import format_context
-from src.api.v1.services.sql_service import execute_sql
-from src.api.v1.retrieval.vector_search import search_semantic
 from src.api.v1.retrieval.hybrid_search import search_hybrid
 from src.api.v1.core.db import (
     get_or_create_conversation,
     save_message,
     get_conversation_messages,
 )
-
-
-# KB Retrieval tools — LLM picks one per KB query
-
-
-
-@tool
-def hybrid_search_tool(query: str) -> str:
-    """
-    Search the credit card knowledge base using HYBRID search
-    (vector similarity + full-text search + Cohere rerank).
-
-    Use this when the query involves nuanced policy language, benefit
-    comparisons, fee structures, eligibility criteria, or multi-concept
-    questions where keyword matching adds recall on top of semantic search.
-
-    Examples:
-    - "What are the lounge access benefits?"
-    - "How does the fee-waiver threshold work for Platinum?"
-    - "Compare reward rates across card variants"
-    """
-    chunks = search_hybrid(query, top_k=5)
-    return format_context(chunks)
-
-
-@tool
-def vector_search_tool(query: str) -> str:
-    """
-    Search the credit card knowledge base using VECTOR-ONLY search
-    (pure cosine similarity, no keyword boosting).
-
-    Use this when the query is conversational or semantically clear but
-    unlikely to benefit from exact keyword matching — e.g. follow-up
-    questions, rephrased queries, or short factual lookups.
-
-    Examples:
-    - "What is the annual fee?"
-    - "Tell me about cashback on dining"
-    - "Is there an EMI conversion feature?"
-    """
-    chunks = search_semantic(query, top_k=5, rerank=True)
-    return format_context(chunks)
-
-
-# Registry of KB tools — passed to ToolNode (in graph.py) and bound to the KB agent LLM
-KB_TOOLS = [hybrid_search_tool, vector_search_tool]
-
-
-
-# SQL tools — LLM picks one per SQL query
-
-
-
-def _run_nl2sql(enriched_query: str) -> tuple[str, list]:
-    """
-    Generate SQL from a natural-language query and execute it.
-    Returns (sql_string, rows_list).  Never raises — returns ("", []) on error.
-    """
-    try:
-        result = (NL2SQL_PROMPT_TEMPLATE | _get_llm()).invoke(
-            {"query": enriched_query},
-            config={
-                "run_name": "nl2sql",
-                "metadata": {
-                    "node": "_run_nl2sql",
-                    "query": enriched_query,
-                },
-            },
-        )
-        sql = result.content.strip()
-        sql = re.sub(r"^```(?:sql)?\s*", "", sql)
-        sql = re.sub(r"\s*```$", "", sql).strip()
-        print(f"[_run_nl2sql] generated SQL: {sql[:160]}")
-        rows = execute_sql(sql)
-        print(f"[_run_nl2sql] {len(rows)} row(s) returned")
-        return sql, rows
-    except Exception as e:
-        print(f"[_run_nl2sql] failed: {e}")
-        return "", []
-
-
-@tool
-def nl2sql_execute(question: str) -> str:
-    """
-    Convert a natural-language question about credit card account data into SQL,
-    execute it against the database, and return the results as a JSON string.
-
-    Use this for any question that requires a SINGLE query — transactions,
-    balances, reward points, billing statement summaries, fee-waiver checks,
-    top merchants, category spend, international transactions, etc.
-
-    Examples:
-    - "Show transactions for CC-881001 in March 2026"
-    - "What is the current reward balance on CC-881001?"
-    - "How much did I spend on food last month?"
-    - "Am I on track for the annual fee waiver?"
-    """
-    sql, rows = _run_nl2sql(question)
-    return json.dumps({"sql": sql, "results": rows}, default=str)
-
-
-@tool
-def nl2sql_execute_multi(question_a: str, question_b: str) -> str:
-    """
-    Run TWO independent natural-language questions as separate SQL queries and
-    return both result sets as a combined JSON string.
-
-    Use this when the user's question clearly requires TWO logically distinct
-    data sets — for example:
-    - Month-over-month comparisons ("this month vs last month")
-    - Two different cards ("CC-001 vs CC-002")
-    - Transactions AND rewards together as separate aggregates
-    - Any "compare X and Y" question where X and Y need separate queries
-
-    Pass each sub-question as question_a and question_b independently.
-    Do NOT use this for questions that a single JOIN or CTE can answer.
-
-    Examples:
-    question_a = "Total spend on CC-881001 for March 2026"
-    question_b = "Total spend on CC-881001 for February 2026"
-    """
-    sql_a, rows_a = _run_nl2sql(question_a)
-    sql_b, rows_b = _run_nl2sql(question_b)
-    return json.dumps(
-        {
-            "query_a": {"sql": sql_a, "results": rows_a},
-            "query_b": {"sql": sql_b, "results": rows_b},
-        },
-        default=str,
-    )
-
-
-# Registry of SQL tools — passed to ToolNode (in graph.py) and bound to the SQL agent LLM
-SQL_TOOLS = [nl2sql_execute, nl2sql_execute_multi]
-
-
+from src.api.v1.tools.kb_tools import KB_TOOLS, hybrid_search_tool, vector_search_tool
+from src.api.v1.tools.sql_tools import SQL_TOOLS, _run_nl2sql
 
 # State
-
 
 
 class AgentState(TypedDict):
@@ -212,9 +72,7 @@ class AgentState(TypedDict):
     response: Optional[object]
 
 
-
 # Helpers
-
 
 
 def _get_llm() -> ChatOpenAI:
@@ -330,9 +188,7 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
     return sql_summary, all_rows
 
 
-
 # Node 0 — History Loader
-
 
 
 def history_loader_node(state: AgentState) -> AgentState:
@@ -349,9 +205,7 @@ def history_loader_node(state: AgentState) -> AgentState:
         return {**state, "conversation_history": []}
 
 
-
 # Node 1 — Router
-
 
 
 def router_node(state: AgentState) -> AgentState:
@@ -391,9 +245,7 @@ def router_node(state: AgentState) -> AgentState:
         return {**state, "route": "general"}
 
 
-
 # Node 2 — KB Agent  (LLM picks vector vs hybrid via tool call)
-
 
 
 def kb_agent_node(state: AgentState) -> AgentState:
@@ -423,6 +275,8 @@ def kb_agent_node(state: AgentState) -> AgentState:
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
             print("[kb_agent_node] no tool call; falling back to hybrid retrieval")
+            from src.api.v1.services.rag_service import format_context
+
             chunks = search_hybrid(state["query"], top_k=5)
             return {
                 **state,
@@ -445,9 +299,7 @@ def kb_agent_node(state: AgentState) -> AgentState:
         }
 
 
-
 # Node 3 — SQL Agent  (LLM picks single vs multi query via tool call)
-
 
 
 def sql_agent_node(state: AgentState) -> AgentState:
@@ -520,9 +372,7 @@ def sql_agent_node(state: AgentState) -> AgentState:
         }
 
 
-
 # Node 4 — General (catch-all)
-
 
 
 def general_node(state: AgentState) -> AgentState:
@@ -578,9 +428,7 @@ def general_node(state: AgentState) -> AgentState:
         }
 
 
-
 # Node 5 — Response
-
 
 
 def response_node(state: AgentState) -> AgentState:
@@ -598,7 +446,7 @@ def response_node(state: AgentState) -> AgentState:
         route = state.get("route", "knowledge_base")
         history_text = _format_history(state.get("conversation_history") or [])
 
-        #  KB-only path 
+        #  KB-only path
         if route == "knowledge_base":
             kb_context = state.get("kb_context")
             if not kb_context:
@@ -670,7 +518,7 @@ def response_node(state: AgentState) -> AgentState:
             )
             return {**state, "response": response}
 
-        #  SQL-only path 
+        #  SQL-only path
         if route == "sql_query":
             # Prefer state values set by fallback in sql_agent_node.
             # If the tool loop ran, read from ToolMessages instead.
@@ -715,7 +563,7 @@ def response_node(state: AgentState) -> AgentState:
             print("[response_node/sql] answer generated")
             return {**state, "response": response}
 
-        #  Both path 
+        #  Both path
         if route == "both":
             messages = state.get("messages") or []
 
