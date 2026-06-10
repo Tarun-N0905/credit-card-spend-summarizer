@@ -1,20 +1,3 @@
-"""
-src/ingestion/docling_parser.py
-
-Converts a raw PDF into a flat list of typed content chunks using Docling's
-layout analysis pipeline.
-
-Each chunk carries:
-  content      — text representation of the element
-  content_type — "text" | "table" | "image"
-  metadata     — page_number, section, source_file, element_type, position
-
-Images are NOT stored as base64 in the database. Instead, raw bytes are sent
-to GPT-4o vision and only the resulting description text is stored as chunk
-content. A failed vision call never aborts the pipeline — a safe fallback is
-used instead.
-"""
-
 import base64
 import io
 import logging
@@ -38,12 +21,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
- 
-# Constants
- 
 
-# Vision model used during ingestion to describe embedded images.
-# The chat model does not support vision, so a separate env var is used.
+# Constants
 _VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 _VISION_MAX_TOKENS = 512
 
@@ -59,31 +38,13 @@ _VISION_PROMPT = (
 # Text chunking — tuned for 3–4 page PDFs.
 _CHUNK_SIZE = 500
 _CHUNK_OVERLAP = 100
-
-# Docling label taxonomy we care about:
-#   section_header  — numbered or unnumbered section headings
-#   title           — document-level title
-#   text / paragraph— body paragraphs
-#   list_item       — bullet / numbered list items
-#   caption         — figure / table captions
-#   footnote        — footnotes at the bottom of a page
-#   table           — tabular data (Docling reconstructs cell structure)
-#   picture         — embedded raster / vector images
-#   chart           — chart/graph images (rendered image, no raw data)
-#   page_header     — running header printed on every page  ← SKIPPED (noise)
-#   page_footer     — running footer printed on every page  ← SKIPPED (noise)
-
 _SKIP_LABELS = {"page_header", "page_footer"}
 _HEADING_LABELS = {"section_header", "title"}
 _TABLE_LABELS = {"table"}
 _IMAGE_LABELS = {"picture", "figure", "chart"}
 
 
- 
 # Image helpers
- 
-
-
 def _describe_image_with_vision_model(img_b64: str, page_no: int | None) -> str:
     """Send a base64-encoded image to GPT-4o and return a text description.
 
@@ -180,11 +141,7 @@ def _save_image_locally(
     return str(image_path)
 
 
- 
 # Table helper
- 
-
-
 def _table_to_text(node, doc) -> str:
     """Convert a Docling table node into readable plain text.
 
@@ -219,14 +176,7 @@ def _table_to_text(node, doc) -> str:
                         rows_text.append(" | ".join(pairs))
 
                 if rows_text:
-                    # Guard: if the average number of populated pairs per row
-                    # is below 1.5 the DataFrame structure is likely degenerate
-                    # (column values bleeding, repeated prefix artefacts, etc).
-                    # Fall through to HTML export rather than persisting with
-                    # garbled output.
-                    total_pairs = sum(
-                        len(r.split(" | ")) for r in rows_text
-                    )
+                    total_pairs = sum(len(r.split(" | ")) for r in rows_text)
                     avg_pairs = total_pairs / len(rows_text)
                     if avg_pairs >= 1.5:
                         return "\n".join(rows_text)
@@ -256,11 +206,7 @@ def _table_to_text(node, doc) -> str:
     return getattr(node, "text", "") or ""
 
 
- 
 # Text chunking helper
- 
-
-
 def _split_text(text: str) -> list[str]:
     """Split a long text block into overlapping chunks.
 
@@ -286,42 +232,12 @@ def _split_text(text: str) -> list[str]:
     return splitter.split_text(text)
 
 
- 
 # Public API
- 
-
-
 def parse_document(file_path: str) -> list[dict]:
-    """Parse a PDF into a flat list of typed content chunks using Docling.
-
-    Each returned chunk is a dict with three keys:
-      content      — text or image description
-      content_type — "text" | "table" | "image"
-      metadata     — dict with content_type, element_type, section,
-                     page_number, source_file, position (bounding box)
-
-    Pipeline steps:
-      1. Configure Docling with OCR, table structure, and picture rendering
-      2. Run the full conversion pipeline on the PDF
-      3. Walk the element tree, skipping page headers/footers
-      4. Route each node to the appropriate handler:
-           text/paragraphs → split into overlapping chunks with section prefix
-           tables          → text representation (single chunk)
-           pictures/charts → GPT-4o vision description (single chunk)
-
-    Args:
-        file_path : Absolute or relative path to the source PDF.
-
-    Returns:
-        List of chunk dicts ready for deduplication, embedding, and storage.
+    """
+    Parse a PDF into a flat list of typed content chunks using Docling.
     """
 
-    #   Step 1: Configure Docling pipeline  
-    # do_ocr=True             — run OCR on scanned/rasterised pages
-    # do_table_structure=True — detect table grid and reconstruct rows/cols
-    # generate_picture_images — render each picture element to a PIL Image
-    #
-    # CPU accelerator is pinned to avoid MPS float64 crash on Apple Silicon.
     pipeline_options = PdfPipelineOptions(
         do_ocr=True,
         do_table_structure=True,
@@ -336,7 +252,7 @@ def parse_document(file_path: str) -> list[dict]:
         },
     )
 
-    #   Step 2: Convert the PDF        
+    #   Step 2: Convert the PDF
     result = converter.convert(file_path)
     doc = result.document
 
@@ -345,7 +261,7 @@ def parse_document(file_path: str) -> list[dict]:
     source_file = os.path.basename(file_path)
     image_counter = 0
 
-    #   Step 3: Walk the document element tree     
+    #   Step 3: Walk the document element tree
     for item in doc.iterate_items():
         node, _ = item if isinstance(item, tuple) else (item, None)
 
@@ -379,14 +295,14 @@ def parse_document(file_path: str) -> list[dict]:
                 "position": snapshot_position,
             }
 
-        #   Section headings & document title    
+        #   Section headings & document title
         if label in _HEADING_LABELS:
             text = getattr(node, "text", "").strip()
             if text:
                 current_section = text
             continue
 
-        #   Tables   
+        #   Tables
         elif label in _TABLE_LABELS:
             table_text = _table_to_text(node, doc).strip()
             if table_text:
@@ -398,7 +314,7 @@ def parse_document(file_path: str) -> list[dict]:
                     }
                 )
 
-        #   Pictures, figures, and charts      
+        #   Pictures, figures, and charts
         elif any(img_label in label for img_label in _IMAGE_LABELS):
             image_counter += 1
             img_b64 = _extract_image_b64(node, doc)

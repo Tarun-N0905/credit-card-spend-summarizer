@@ -1,10 +1,3 @@
-"""
-src/api/v1/tools/kb_tools.py
-
-KB retrieval tools for the Credit Card Spend Summarizer.
-The KB agent LLM (bound via bind_tools) picks one of these per query.
-"""
-
 from langchain_core.tools import tool
 from src.api.v1.services.rag_service import format_context
 from src.api.v1.retrieval.vector_search import search_semantic

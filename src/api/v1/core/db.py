@@ -1,19 +1,3 @@
-"""
-src/core/db.py
-
-All runtime database operations for the Credit Card Spend Summarizer.
-
-Responsibilities:
-  - Connection management (single connection pool via psycopg)
-  - Document registration (upsert_document)
-  - Chunk storage with embeddings (store_chunks)
-  - Hash lookup for deduplication (get_existing_hashes)
-  - Conversation and message persistence
-  - Customer/transaction queries called by SQL tools
-
-Schema is managed separately via schema.sql — no DDL here.
-"""
-
 import json
 import logging
 import uuid
@@ -29,8 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 # Connection management
-
-
 def _get_connection() -> psycopg.Connection:
     """Open and return a new psycopg connection using the configured DSN.
 
@@ -73,8 +55,6 @@ def get_db() -> Generator[psycopg.Connection, None, None]:
 
 
 # Document registration
-
-
 def upsert_document(document_name: str, document_type: str) -> str:
     """Insert a new document record or return the existing one's UUID.
 
@@ -115,8 +95,6 @@ def upsert_document(document_name: str, document_type: str) -> str:
 
 
 # Chunk storage
-
-
 def store_chunks(chunks: list[dict], doc_id: str) -> int:
     """Embed and store a list of deduplicated chunks into document_chunks.
 
@@ -196,8 +174,6 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
 
 
 # Deduplication support
-
-
 def get_existing_hashes() -> set[str]:
     """Fetch all chunk_hash values currently stored in document_chunks.
 
@@ -218,8 +194,6 @@ def get_existing_hashes() -> set[str]:
 
 
 # Conversation storage
-
-
 def get_or_create_conversation(session_id: str) -> str:
     """Return the conversation UUID for a session, creating it if needed.
 
@@ -300,8 +274,6 @@ def get_conversation_messages(conversation_id: str) -> list[dict]:
 
 
 # Health check
-
-
 def check_db_connection() -> bool:
     """Verify the database is reachable by running a lightweight query.
 
@@ -318,8 +290,6 @@ def check_db_connection() -> bool:
 
 
 # Conversation listing and deletion (used by API endpoints)
-
-
 def list_conversations() -> list[dict]:
     """Return all conversations with a first-message preview and timestamp.
 

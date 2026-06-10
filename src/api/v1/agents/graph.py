@@ -1,57 +1,3 @@
-"""
-src/agents/graph.py
-
-LangGraph state machine — both KB and SQL use ToolNode-backed agent nodes.
-
-Flow:
-    history_loader → router → kb_agent  → kb_tool_node  → response → END
-                           ├→ sql_agent → sql_tool_node ↗
-                           ├→ both → kb_agent → kb_tool_node → sql_agent → sql_tool_node ↗
-                           └→ general                                           → END
-
-Key design decisions
-────────────────────
-• KB path   : kb_agent_node  emits tool_calls → kb_tool_node  (ToolNode) executes them
-• SQL path  : sql_agent_node emits tool_calls → sql_tool_node (ToolNode) executes them
-• Both path : reuses the same kb_agent → kb_tool_node → sql_agent → sql_tool_node pipeline
-              via a dedicated "both" entry node that simply sets the route, keeping
-              ToolNode-backed execution consistent across all paths.
-• No keyword matching anywhere — the LLM bound to each agent decides which tool to call.
-• response_node reads ToolMessage results from state["messages"] for all paths.
-
-Streaming
-─────────
-run_credit_card_agent_stream() runs the full LangGraph pipeline synchronously
-(retrieval + SQL are fast I/O), then re-streams the final answer token-by-token
-using the same prompt templates as response_node. This keeps the graph simple
-and gives Streamlit real incremental output for the answer text.
-
-SSE token encoding
-──────────────────
-Every token yielded from chain.stream() is JSON-encoded before embedding in the
-SSE frame:
-
-    yield f"data: {json.dumps(token)}\\n\\n"
-
-This is necessary because LLM tokens can contain raw newlines, markdown symbols,
-or even the literal string "data: " — all of which break the SSE framing if
-written unescaped. JSON encoding produces a single-line, safely escaped string
-that the client decodes with json.loads() before appending to the answer buffer.
-
-Client-side parsing (Streamlit / JS):
-    if line.startswith("data: "):
-        payload = line[6:]
-        if payload == "[DONE]":
-            break
-        elif payload.startswith("[META]"):
-            metadata = json.loads(payload[7:])
-        elif payload.startswith("[ERROR]"):
-            handle_error(payload[7:])
-        else:
-            token = json.loads(payload)   # ← decode JSON string
-            answer += token
-"""
-
 import json
 import re
 from typing import Generator
@@ -199,11 +145,7 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         }
 
 
-
 # Streaming support
-
-
-
 def _build_stream_prompt(final_state: AgentState):
     """
     Reconstruct the exact prompt inputs used by response_node, but return
@@ -314,23 +256,6 @@ def run_credit_card_agent_stream(
     """
     Run the full LangGraph pipeline (routing + retrieval/SQL), then stream
     the final LLM answer token-by-token as plain text chunks.
-
-    Yields a sequence of SSE-formatted strings:
-      data: <json-encoded-token>\\n\\n  — answer text chunks (JSON string, decode with json.loads)
-      data: [DONE]\\n\\n                — signals end of answer text
-      data: [META] <json>\\n\\n        — final metadata (route, page_no, etc.)
-      data: [ERROR] <msg>\\n\\n        — on failure
-
-    IMPORTANT — client-side decoding:
-        payload = line[6:]               # strip "data: " prefix
-        if payload == "[DONE]": ...
-        elif payload.startswith("[META]"): metadata = json.loads(payload[7:])
-        elif payload.startswith("[ERROR]"): ...
-        else: token = json.loads(payload)   # ← must json.loads every token
-              answer += token
-
-    Tokens are JSON-encoded so that newlines, markdown, and any other special
-    characters inside the LLM output cannot break the SSE framing.
     """
     initial_state: AgentState = {
         "query": query,
@@ -349,8 +274,6 @@ def run_credit_card_agent_stream(
 
     try:
         # Step 1 — run the full graph (retrieval/SQL happen here)
-        # response_node still builds an AgentResponse on state, but we ignore
-        # its answer text; we re-stream below using the same prompt + inputs.
         final_state = credit_card_agent.invoke(
             initial_state,
             config={
@@ -366,22 +289,16 @@ def run_credit_card_agent_stream(
         print(f"[stream] graph done, route={route}")
 
         # Step 2 — rebuild the prompt and stream the answer.
-        # FIX: tokens are JSON-encoded before embedding in the SSE frame so
-        # that any newlines or special characters in the token cannot split or
-        # corrupt the SSE message boundary.
         chain, inputs, metadata = _build_stream_prompt(final_state)
 
         for chunk in chain.stream(inputs):
             token = chunk.content if hasattr(chunk, "content") else str(chunk)
             if token:
-                # json.dumps produces a quoted, single-line, safely escaped
-                # string — e.g. "Hello\nworld" becomes "\"Hello\\nworld\""
                 yield f"data: {json.dumps(token)}\n\n"
 
         yield "data: [DONE]\n\n"
 
-        # Step 3 — emit metadata so the client can show sources etc.
-        # Enrich image_paths from final_state if available.
+        # Step 3 — emit metadata so the client can show sources etc
         response_obj = final_state.get("response")
         if response_obj is not None:
             if hasattr(response_obj, "model_dump"):

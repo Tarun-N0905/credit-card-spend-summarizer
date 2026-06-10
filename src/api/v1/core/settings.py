@@ -1,17 +1,3 @@
-"""
-src/core/settings.py
-
-Single source of truth for all environment variables.
-
-Every module that needs a config value imports from here — nothing reads
-os.getenv() directly outside this file. This makes it trivial to audit
-what config the app depends on and to swap values in tests.
-
-Usage:
-    from src.core.settings import settings
-    conn = psycopg.connect(settings.pg_connection_string)
-"""
-
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,7 +15,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",          # ignore unrecognised env vars silently
+        extra="ignore",  # ignore unrecognised env vars silently
     )
 
     #   PostgreSQL
