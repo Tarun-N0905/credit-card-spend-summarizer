@@ -26,7 +26,7 @@ from components.chat import (
 #  Page config
 
 st.set_page_config(
-    page_title="Credit Spend Summarizer",
+    page_title="North Star Agent",
     page_icon="💳",
     layout="centered",
     initial_sidebar_state="collapsed",

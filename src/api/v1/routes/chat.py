@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import json
@@ -20,11 +20,6 @@ class ChatResponse(BaseModel):
 
 
 def _extract_reply(agent_response: dict) -> str:
-    """
-    SpendSummaryResponse  → uses 'summary_text'
-    AgentResponse (KB)    → uses 'answer'
-    Error fallback        → uses 'answer'
-    """
     return (
         agent_response.get("summary_text")
         or agent_response.get("answer")
@@ -52,13 +47,35 @@ async def chat(body: ChatRequest):
         return JSONResponse(status_code=500, content=_UNAVAILABLE)
 
 
+def _persist_reply(conversation_id: str, accumulated: list[str]):
+    """Background task: joins accumulated tokens and saves to DB."""
+    full_reply = "".join(accumulated).strip()
+    if full_reply:
+        try:
+            save_message(conversation_id, "assistant", full_reply)
+            print(f"[chat/stream] persisted reply ({len(full_reply)} chars)")
+        except Exception as exc:
+            print(f"[chat/stream] failed to persist reply: {exc}")
+
+
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest):
+async def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks):
     """
     Streaming endpoint for Streamlit.
 
     Runs the full LangGraph pipeline (routing, retrieval, SQL) and then
     streams the final LLM answer token-by-token as Server-Sent Events.
+
+    SSE event format
+    ────────────────
+    data: <token>          — incremental answer text; accumulate on the client
+    data: [DONE]           — answer is complete; stop writing to the stream widget
+    data: [META] <json>    — final metadata: route_taken, page_no, document_name,
+                             sql_query_executed, image_paths
+    data: [ERROR] <msg>    — something went wrong; display msg to the user
+
+    Fix: save_message is registered as a BackgroundTask so it always runs
+    after the stream is fully consumed, even if the generator exits early.
     """
     conversation_id = get_or_create_conversation(body.session_id)
     save_message(conversation_id, "user", body.message)
@@ -69,23 +86,20 @@ async def chat_stream(body: ChatRequest):
         for chunk in run_credit_card_agent_stream(
             body.message, session_id=body.session_id
         ):
-            # Each chunk is a JSON-encoded token string
+            # Strip SSE prefix; skip control frames like [DONE] / [META] / [ERROR]
             payload = chunk.removeprefix("data: ").strip()
             if payload and not payload.startswith("["):
                 try:
                     token = json.loads(payload)
                 except Exception:
                     token = payload
-                accumulated.append(token)
+                if isinstance(token, str):
+                    accumulated.append(token)
             yield chunk
 
-        # Persist the full assistant reply as a single string
-        full_reply = "".join(accumulated).strip()
-        if full_reply:
-            try:
-                save_message(conversation_id, "assistant", full_reply)
-            except Exception as exc:
-                print(f"[chat/stream] failed to persist reply: {exc}")
+    # BackgroundTasks runs _after_ the StreamingResponse is fully sent,
+    # guaranteeing the assistant reply is persisted regardless of client behaviour.
+    background_tasks.add_task(_persist_reply, conversation_id, accumulated)
 
     return StreamingResponse(
         event_stream(),
@@ -94,55 +108,5 @@ async def chat_stream(body: ChatRequest):
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
         },
+        background=background_tasks,
     )
-
-
-# @router.post("/chat/stream")
-# async def chat_stream(body: ChatRequest):
-#     """
-#     Streaming endpoint for Streamlit.
-
-#     Runs the full LangGraph pipeline (routing, retrieval, SQL) and then
-#     streams the final LLM answer token-by-token as Server-Sent Events.
-
-#     SSE event format
-#     ────────────────
-#     data: <token>          — incremental answer text; accumulate on the client
-#     data: [DONE]           — answer is complete; stop writing to the stream widget
-#     data: [META] <json>    — final metadata: route_taken, page_no, document_name,
-#                              sql_query_executed, image_paths
-#     data: [ERROR] <msg>    — something went wrong; display msg to the user
-
-#     """
-#     conversation_id = get_or_create_conversation(body.session_id)
-#     save_message(conversation_id, "user", body.message)
-
-#     accumulated: list[str] = []
-
-#     def event_stream():
-#         for chunk in run_credit_card_agent_stream(
-#             body.message, session_id=body.session_id
-#         ):
-#             # Preserve all newlines so markdown tables stay intact
-#             payload = chunk.removeprefix("data: ")
-#             if payload and not payload.startswith("["):
-#                 accumulated.append(payload)
-#             yield chunk
-
-#         # Persist full reply
-#         full_reply = "".join(accumulated).strip()
-#         if full_reply:
-#             try:
-#                 save_message(conversation_id, "assistant", full_reply)
-#             except Exception as exc:
-#                 print(f"[chat/stream] failed to persist reply: {exc}")
-
-#     return StreamingResponse(
-#         event_stream(),
-#         media_type="text/event-stream",
-#         headers={
-#             # Prevent nginx / proxies from buffering SSE chunks.
-#             "X-Accel-Buffering": "no",
-#             "Cache-Control": "no-cache",
-#         },
-#     )

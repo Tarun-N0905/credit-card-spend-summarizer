@@ -22,7 +22,7 @@ def render_header() -> None:
     <div class="cs-header">
         <div class="cs-header-icon">💳</div>
         <div>
-            <div class="cs-header-title">Credit Spend Summarizer</div>
+            <div class="cs-header-title">North Star Bank Agent</div>
         </div>
     </div>
     """,
