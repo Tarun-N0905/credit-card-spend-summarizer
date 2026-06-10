@@ -8,12 +8,24 @@ Templates and their {variables}:
     GENERAL_PROMPT_TEMPLATE         {query}, {history}
     SPEND_SUMMARY_PROMPT_TEMPLATE   {context_json}, {history}
     NL2SQL_PROMPT_TEMPLATE          {query}
-    SQL_AGENT_PROMPT_TEMPLATE       {query}, {history}   ← NEW (tool-bound SQL agent)
+    SQL_AGENT_PROMPT_TEMPLATE       {query}, {history}
     SQL_ANSWER_PROMPT_TEMPLATE      {query}, {sql_executed}, {sql_results}, {history}
     KB_GENERATION_PROMPT_TEMPLATE   {query}, {context}, {history}
+    COMBINED_ANSWER_PROMPT_TEMPLATE {query}, {kb_context}, {sql_results}, {history}
 """
 
+from typing import Literal
+
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
+
+
+# ── Structured router output ────────────────────────────────────────────────
+
+class RouteDecision(BaseModel):
+    """Structured output for the router node."""
+    route: Literal["knowledge_base", "sql_query", "both", "general"]
+
 
 #  Router
 
@@ -73,10 +85,7 @@ Classify the user's query into EXACTLY one of four routes:
 
 IMPORTANT: When in doubt between "knowledge_base" and "general", always prefer
 "knowledge_base". Only route to "general" when the query is obviously unrelated
-to NorthStar Bank credit card products, policies, or account data.
-
-Reply with ONLY the route label — one of "knowledge_base", "sql_query", "both", or "general".
-No explanation, no punctuation, no extra words. Just the label."""
+to NorthStar Bank credit card products, policies, or account data."""
 
 ROUTER_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages(
     [

@@ -1,11 +1,14 @@
 import json
+import logging
 import operator
+from functools import lru_cache
 from typing import Annotated, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from src.api.v1.core.settings import get_settings
 from src.api.v1.agents.prompts import (
+    RouteDecision,
     COMBINED_ANSWER_PROMPT_TEMPLATE,
     ROUTER_PROMPT_TEMPLATE,
     GENERAL_PROMPT_TEMPLATE,
@@ -22,6 +25,10 @@ from src.api.v1.core.db import (
 from src.api.v1.tools.kb_tools import KB_TOOLS, hybrid_search_tool
 from src.api.v1.tools.sql_tools import SQL_TOOLS, _run_nl2sql
 
+logger = logging.getLogger(__name__)
+
+KB_CONFIDENCE_THRESHOLD = 0.4
+
 
 class AgentState(TypedDict):
     query: str
@@ -34,9 +41,11 @@ class AgentState(TypedDict):
     sql_executed: Optional[str]
     sql_results: Optional[list]
     sql_queries_run: Optional[list]
+    sql_facts: Optional[str]
     response: Optional[object]
 
 
+@lru_cache(maxsize=1)
 def _get_llm() -> ChatOpenAI:
     s = get_settings()
     return ChatOpenAI(
@@ -44,13 +53,15 @@ def _get_llm() -> ChatOpenAI:
     )
 
 
-def _get_kb_agent_llm() -> ChatOpenAI:
+@lru_cache(maxsize=1)
+def _get_kb_agent_llm():
     s = get_settings()
     llm = ChatOpenAI(model=s.openai_chat_model, temperature=0, api_key=s.openai_api_key)
     return llm.bind_tools(KB_TOOLS)
 
 
-def _get_sql_agent_llm() -> ChatOpenAI:
+@lru_cache(maxsize=1)
+def _get_sql_agent_llm():
     s = get_settings()
     llm = ChatOpenAI(model=s.openai_chat_model, temperature=0, api_key=s.openai_api_key)
     return llm.bind_tools(SQL_TOOLS)
@@ -125,6 +136,17 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
     return "\n\n".join(all_sqls), all_rows
 
 
+def _chunks_pass_threshold(chunks: list, threshold: float) -> bool:
+    """Return True if at least one chunk clears the confidence threshold."""
+    for chunk in chunks or []:
+        score = getattr(chunk, "score", None) or (
+            chunk.get("score") if isinstance(chunk, dict) else None
+        )
+        if score is not None and score >= threshold:
+            return True
+    return False
+
+
 def history_loader_node(state: AgentState) -> AgentState:
     session_id = state.get("session_id", "")
     if not session_id:
@@ -135,7 +157,7 @@ def history_loader_node(state: AgentState) -> AgentState:
         history = messages[-6:] if messages else []
         return {**state, "conversation_history": history}
     except Exception as e:
-        print(f"[history_loader_node] failed: {e}")
+        logger.error("[history_loader_node] failed: %s", e)
         return {**state, "conversation_history": []}
 
 
@@ -144,7 +166,8 @@ def router_node(state: AgentState) -> AgentState:
     try:
         history = state.get("conversation_history") or []
         enriched = _enrich_query(state["query"], history)
-        result = (ROUTER_PROMPT_TEMPLATE | _get_llm()).invoke(
+        router_chain = ROUTER_PROMPT_TEMPLATE | _get_llm().with_structured_output(RouteDecision)
+        decision: RouteDecision = router_chain.invoke(
             {"query": enriched},
             config={
                 "run_name": "router",
@@ -155,24 +178,11 @@ def router_node(state: AgentState) -> AgentState:
                 },
             },
         )
-        route = result.content.strip().lower()
-
-        if "both" in route:
-            route = "both"
-        elif "sql_query" in route:
-            route = "sql_query"
-        elif "knowledge_base" in route:
-            route = "knowledge_base"
-        elif "general" in route:
-            route = "general"
-        else:
-            print(f"[router_node] unexpected route '{route}', defaulting to general")
-            route = "general"
-
-        print(f"[router_node] route='{route}'")
+        route = decision.route
+        logger.info("[router_node] route='%s'", route)
         return {**state, "route": route}
     except Exception as e:
-        print(f"[router_node] failed: {e}")
+        logger.error("[router_node] failed: %s", e)
         return {**state, "route": "general"}
 
 
@@ -199,7 +209,7 @@ def kb_agent_node(state: AgentState) -> AgentState:
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
-            print("[kb_agent_node] no tool call; falling back to hybrid_search_tool")
+            logger.warning("[kb_agent_node] no tool call; falling back to hybrid_search_tool")
             tool_result = hybrid_search_tool.invoke(
                 {"query": state["query"], "top_k": 5}
             )
@@ -218,11 +228,11 @@ def kb_agent_node(state: AgentState) -> AgentState:
             }
 
         tool_name = tool_calls[0].get("name", "")
-        print(f"[kb_agent_node] LLM selected tool: {tool_name!r}")
+        logger.info("[kb_agent_node] LLM selected tool: '%s'", tool_name)
         return {**state, "messages": [human_msg, ai_msg]}
 
     except Exception as e:
-        print(f"[kb_agent_node] failed: {e}")
+        logger.error("[kb_agent_node] failed: %s", e)
         return {
             **state,
             "messages": [],
@@ -263,7 +273,7 @@ def sql_agent_node(state: AgentState) -> AgentState:
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
-            print("[sql_agent_node] no tool call; falling back to direct NL2SQL")
+            logger.warning("[sql_agent_node] no tool call; falling back to direct NL2SQL")
             sql, rows = _run_nl2sql(enriched)
             return {
                 **state,
@@ -274,11 +284,11 @@ def sql_agent_node(state: AgentState) -> AgentState:
             }
 
         tool_name = tool_calls[0].get("name", "")
-        print(f"[sql_agent_node] LLM selected tool: {tool_name!r}")
+        logger.info("[sql_agent_node] LLM selected tool: '%s'", tool_name)
         return {**state, "messages": [human_msg, ai_msg]}
 
     except Exception as e:
-        print(f"[sql_agent_node] failed: {e}")
+        logger.error("[sql_agent_node] failed: %s", e)
         return {
             **state,
             "messages": [],
@@ -288,57 +298,61 @@ def sql_agent_node(state: AgentState) -> AgentState:
         }
 
 
-def general_node(state: AgentState) -> AgentState:
-    try:
-        history_text = _format_history(state.get("conversation_history") or [])
-        result = (GENERAL_PROMPT_TEMPLATE | _get_llm()).invoke(
-            {"query": state["query"], "history": history_text},
-            config={
-                "run_name": "general",
-                "metadata": {
-                    "node": "general_node",
-                    "session_id": state.get("session_id", ""),
-                    "query": state["query"],
-                },
-            },
-        )
-        response = AgentResponse(
-            query=state["query"],
-            answer=result.content.strip(),
-            data_sources=[],
-            page_no="N/A",
-            document_name="N/A",
-            sql_query_executed=None,
-            route_taken="general",
-            image_paths=None,
-        )
-        print("[general_node] answer generated")
-        return {**state, "response": response}
-
-    except Exception as e:
-        print(f"[general_node] failed: {e}")
-        return {
-            **state,
-            "response": AgentResponse(
-                query=state["query"],
-                answer="Sorry, I encountered an error. Please try again.",
-                data_sources=[],
-                page_no="N/A",
-                document_name="N/A",
-                sql_query_executed=None,
-                route_taken="general",
-                image_paths=None,
-            ),
-        }
-
-
 def response_node(state: AgentState) -> AgentState:
     try:
         llm = _get_llm()
         route = state.get("route", "knowledge_base")
         history_text = _format_history(state.get("conversation_history") or [])
 
+        # ── general (inlined — no separate node) ────────────────────────────
+        if route == "general":
+            result = (GENERAL_PROMPT_TEMPLATE | llm).invoke(
+                {"query": state["query"], "history": history_text},
+                config={
+                    "run_name": "response_general",
+                    "metadata": {
+                        "node": "response_node",
+                        "route": "general",
+                        "session_id": state.get("session_id", ""),
+                        "query": state["query"],
+                    },
+                },
+            )
+            response = AgentResponse(
+                query=state["query"],
+                answer=result.content.strip(),
+                data_sources=[],
+                page_no="N/A",
+                document_name="N/A",
+                sql_query_executed=None,
+                route_taken="general",
+                image_paths=None,
+            )
+            logger.info("[response_node/general] answer generated")
+            return {**state, "response": response}
+
+        # ── knowledge_base ───────────────────────────────────────────────────
         if route == "knowledge_base":
+            chunks = state.get("chunks") or []
+
+            # Confidence gate — short-circuit if no chunk clears threshold
+            if chunks and not _chunks_pass_threshold(chunks, KB_CONFIDENCE_THRESHOLD):
+                logger.info(
+                    "[response_node/kb] all chunks below threshold %.2f — short-circuiting",
+                    KB_CONFIDENCE_THRESHOLD,
+                )
+                response = AgentResponse(
+                    query=state["query"],
+                    answer="I don't have enough information in my knowledge base to answer that accurately.",
+                    data_sources=[],
+                    page_no="N/A",
+                    document_name="N/A",
+                    sql_query_executed=None,
+                    route_taken="knowledge_base",
+                    image_paths=None,
+                )
+                return {**state, "response": response}
+
             kb_context = state.get("kb_context")
             if not kb_context:
                 tool_messages = [
@@ -350,7 +364,6 @@ def response_node(state: AgentState) -> AgentState:
                     "\n\n".join(tm.content for tm in tool_messages)
                     or "No relevant documents found."
                 )
-            chunks = state.get("chunks") or []
 
             result = (KB_GENERATION_PROMPT_TEMPLATE | llm).invoke(
                 {
@@ -403,11 +416,13 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="knowledge_base",
                 image_paths=image_paths,
             )
-            print(
-                f"[response_node/kb] answer generated — {len(image_paths or [])} image(s)"
+            logger.info(
+                "[response_node/kb] answer generated — %d image(s)",
+                len(image_paths or []),
             )
             return {**state, "response": response}
 
+        # ── sql_query ────────────────────────────────────────────────────────
         if route == "sql_query":
             sql_executed = state.get("sql_executed") or ""
             sql_results = state.get("sql_results") or []
@@ -444,9 +459,10 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="sql_query",
                 image_paths=None,
             )
-            print("[response_node/sql] answer generated")
+            logger.info("[response_node/sql] answer generated")
             return {**state, "response": response}
 
+        # ── both ─────────────────────────────────────────────────────────────
         if route == "both":
             messages = state.get("messages") or []
 
@@ -469,9 +485,10 @@ def response_node(state: AgentState) -> AgentState:
                 elif tool_name in sql_tool_names:
                     sql_tool_msgs.append(m)
 
-            print(
-                f"[response_node/both] kb_tool_msgs={len(kb_tool_msgs)} "
-                f"sql_tool_msgs={len(sql_tool_msgs)}"
+            logger.info(
+                "[response_node/both] kb_tool_msgs=%d sql_tool_msgs=%d",
+                len(kb_tool_msgs),
+                len(sql_tool_msgs),
             )
 
             kb_context = (
@@ -544,13 +561,15 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="both",
                 image_paths=image_paths or None,
             )
-            print(f"[response_node/both] merged answer — {len(image_paths)} image(s)")
+            logger.info(
+                "[response_node/both] merged answer — %d image(s)", len(image_paths)
+            )
             return {**state, "response": response}
 
         raise ValueError(f"response_node received unexpected route: {route!r}")
 
     except Exception as e:
-        print(f"[response_node] failed: {e}")
+        logger.error("[response_node] failed: %s", e)
         return {
             **state,
             "response": AgentResponse(

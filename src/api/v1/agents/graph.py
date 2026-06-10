@@ -1,5 +1,5 @@
 import json
-import re
+import logging
 from typing import Generator
 
 from langchain_core.messages import ToolMessage
@@ -13,7 +13,6 @@ from src.api.v1.agents.nodes import (
     router_node,
     kb_agent_node,
     sql_agent_node,
-    general_node,
     response_node,
     KB_TOOLS,
     SQL_TOOLS,
@@ -21,6 +20,7 @@ from src.api.v1.agents.nodes import (
     _format_history,
     _parse_sql_tool_messages,
 )
+# NOTE: general_node removed — general route handled inside response_node
 from src.api.v1.agents.prompts import (
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
@@ -28,6 +28,8 @@ from src.api.v1.agents.prompts import (
     GENERAL_PROMPT_TEMPLATE,
 )
 from src.api.v1.core.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def build_agent_graph():
@@ -45,7 +47,6 @@ def build_agent_graph():
     graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("sql_tool_node", ToolNode(SQL_TOOLS))
 
-    graph.add_node("general", general_node)
     graph.add_node("response", response_node)
 
     #  Entry point
@@ -54,7 +55,7 @@ def build_agent_graph():
     #  history_loader → router
     graph.add_edge("history_loader", "router")
 
-    #  router → agent nodes
+    #  router → agent nodes (general now hits response_node directly)
     graph.add_conditional_edges(
         "router",
         lambda state: state.get("route", "general"),
@@ -62,7 +63,7 @@ def build_agent_graph():
             "knowledge_base": "kb_agent",
             "sql_query": "sql_agent",
             "both": "kb_agent",  # enters the shared pipeline at kb_agent
-            "general": "general",
+            "general": "response",
         },
     )
 
@@ -83,12 +84,10 @@ def build_agent_graph():
     graph.add_edge("sql_agent", "sql_tool_node")
     graph.add_edge("sql_tool_node", "response")
 
-    #  general flow
     graph.add_edge("response", END)
-    graph.add_edge("general", END)
 
     compiled = graph.compile()
-    print("[build_agent_graph] compiled successfully")
+    logger.info("[build_agent_graph] compiled successfully")
     return compiled
 
 
@@ -244,7 +243,7 @@ def _build_stream_prompt(final_state: AgentState):
         }
         return chain, inputs, metadata
 
-    # general — prompt is simple
+    # general — falls through to GENERAL_PROMPT_TEMPLATE
     chain = GENERAL_PROMPT_TEMPLATE | llm
     inputs = {"query": final_state["query"], "history": history_text}
     return chain, inputs, metadata
@@ -286,7 +285,7 @@ def run_credit_card_agent_stream(
             },
         )
         route = final_state.get("route", "unknown")
-        print(f"[stream] graph done, route={route}")
+        logger.info("[stream] graph done, route=%s", route)
 
         # Step 2 — rebuild the prompt and stream the answer.
         chain, inputs, metadata = _build_stream_prompt(final_state)
@@ -318,5 +317,5 @@ def run_credit_card_agent_stream(
         yield f"data: [META] {json.dumps(metadata)}\n\n"
 
     except Exception as e:
-        print(f"[stream] error: {e}")
+        logger.error("[stream] error: %s", e)
         yield f"data: [ERROR] {str(e)}\n\n"
