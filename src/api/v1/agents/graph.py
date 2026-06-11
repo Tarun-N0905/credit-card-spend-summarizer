@@ -82,6 +82,9 @@ def build_agent_graph(checkpointer: PostgresSaver):
     graph.add_edge("response", END)
 
     compiled = graph.compile(checkpointer=checkpointer)
+    graph_image = compiled.get_graph().draw_mermaid_png()
+    with open("reference/tool_workflow.png", "wb") as f:
+        f.write(graph_image)
     logger.info("[build_agent_graph] compiled with PostgresSaver checkpointer")
     return compiled
 

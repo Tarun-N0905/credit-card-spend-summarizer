@@ -1,29 +1,14 @@
-"""
-src/agents/prompts.py
-
-All LangChain prompt templates for the credit card agent.
-
-Templates and their {variables}:
-    ROUTER_PROMPT_TEMPLATE          {query}
-    GENERAL_PROMPT_TEMPLATE         {query}, {history}
-    SPEND_SUMMARY_PROMPT_TEMPLATE   {context_json}, {history}
-    NL2SQL_PROMPT_TEMPLATE          {query}
-    SQL_AGENT_PROMPT_TEMPLATE       {query}, {history}
-    SQL_ANSWER_PROMPT_TEMPLATE      {query}, {sql_executed}, {sql_results}, {history}
-    KB_GENERATION_PROMPT_TEMPLATE   {query}, {context}, {history}
-    COMBINED_ANSWER_PROMPT_TEMPLATE {query}, {kb_context}, {sql_results}, {history}
-"""
-
 from typing import Literal
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
+# Structured router output
 
-# ── Structured router output ────────────────────────────────────────────────
 
 class RouteDecision(BaseModel):
     """Structured output for the router node."""
+
     route: Literal["knowledge_base", "sql_query", "both", "general"]
 
 

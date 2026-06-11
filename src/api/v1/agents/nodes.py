@@ -68,7 +68,7 @@ def _history_text_from_messages(messages: list) -> str:
     """
     human_ai = [
         m for m in (messages or []) if isinstance(m, (HumanMessage, AIMessage))
-    ][-6:]
+    ][-8:]
     return "\n".join(
         f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}"
         for m in human_ai
@@ -134,23 +134,6 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
                 all_rows.extend(part.get("results") or [])
 
     return "\n\n".join(all_sqls), all_rows
-
-
-def _chunks_pass_threshold(chunks: list, threshold: float) -> bool:
-    for chunk in chunks or []:
-        score = getattr(chunk, "score", None) or (
-            chunk.get("score") if isinstance(chunk, dict) else None
-        )
-        if score is not None and score >= threshold:
-            return True
-    return False
-
-
-# ── Node functions ───────────────────────────────────────────────────────────
-# IMPORTANT: Each node must return ONLY the fields it is updating.
-# Returning {**state, ...} would re-add the full messages list through the
-# operator.add reducer, duplicating every message on every node execution.
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def router_node(state: AgentState) -> dict:
@@ -250,7 +233,7 @@ def response_node(state: AgentState) -> dict:
         messages = state.get("messages") or []
         history_text = _history_text_from_messages(messages)
 
-        # ── general ──────────────────────────────────────────────────────────
+        #  general
         if route == "general":
             result = (GENERAL_PROMPT_TEMPLATE | llm).invoke(
                 {"query": state["query"], "history": history_text},
@@ -281,7 +264,7 @@ def response_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=answer)],
             }
 
-        # ── knowledge_base ───────────────────────────────────────────────────
+        #  knowledge_base
         if route == "knowledge_base":
             chunks = state.get("chunks") or []
             kb_context = state.get("kb_context")
@@ -352,7 +335,7 @@ def response_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=answer)],
             }
 
-        # ── sql_query ────────────────────────────────────────────────────────
+        #  sql_query
         if route == "sql_query":
             sql_executed = state.get("sql_executed") or ""
             sql_results = state.get("sql_results") or []
@@ -394,7 +377,7 @@ def response_node(state: AgentState) -> dict:
                 "messages": [AIMessage(content=answer)],
             }
 
-        # ── both ─────────────────────────────────────────────────────────────
+        #  both
         if route == "both":
             kb_tool_names = {"hybrid_search_tool", "vector_search_tool"}
             sql_tool_names = {"nl2sql_execute", "nl2sql_execute_multi"}
