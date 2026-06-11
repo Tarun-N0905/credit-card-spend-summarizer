@@ -2,14 +2,14 @@ import json
 import logging
 from typing import Generator
 
-from langchain_core.messages import ToolMessage
-from langchain_openai import ChatOpenAI
+import psycopg
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.postgres import PostgresSaver
 
 from src.api.v1.agents.nodes import (
     AgentState,
-    history_loader_node,
     router_node,
     kb_agent_node,
     sql_agent_node,
@@ -17,10 +17,9 @@ from src.api.v1.agents.nodes import (
     KB_TOOLS,
     SQL_TOOLS,
     _get_llm,
-    _format_history,
     _parse_sql_tool_messages,
+    _history_text_from_messages,  # ← single source of truth (was duplicated)
 )
-# NOTE: general_node removed — general route handled inside response_node
 from src.api.v1.agents.prompts import (
     KB_GENERATION_PROMPT_TEMPLATE,
     SQL_ANSWER_PROMPT_TEMPLATE,
@@ -32,45 +31,43 @@ from src.api.v1.core.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
-def build_agent_graph():
+def _build_checkpointer() -> PostgresSaver:
+    settings = get_settings()
+    conn = psycopg.connect(settings.pg_connection_string, autocommit=True)
+    saver = PostgresSaver(conn)
+    saver.setup()
+    logger.info("[checkpointer] PostgresSaver ready")
+    return saver
+
+
+def build_agent_graph(checkpointer: PostgresSaver):
     graph = StateGraph(AgentState)
 
-    #  Nodes
-    graph.add_node("history_loader", history_loader_node)
     graph.add_node("router", router_node)
 
-    # KB agent + tool executor
     graph.add_node("kb_agent", kb_agent_node)
     graph.add_node("kb_tool_node", ToolNode(KB_TOOLS))
 
-    # SQL agent + tool executor
     graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("sql_tool_node", ToolNode(SQL_TOOLS))
 
     graph.add_node("response", response_node)
 
-    #  Entry point
-    graph.set_entry_point("history_loader")
+    graph.set_entry_point("router")
 
-    #  history_loader → router
-    graph.add_edge("history_loader", "router")
-
-    #  router → agent nodes (general now hits response_node directly)
     graph.add_conditional_edges(
         "router",
         lambda state: state.get("route", "general"),
         {
             "knowledge_base": "kb_agent",
             "sql_query": "sql_agent",
-            "both": "kb_agent",  # enters the shared pipeline at kb_agent
+            "both": "kb_agent",
             "general": "response",
         },
     )
 
-    #  KB flow: agent → tool node → response
     graph.add_edge("kb_agent", "kb_tool_node")
 
-    #  kb_tool_node branches: KB-only → response, both → sql_agent
     graph.add_conditional_edges(
         "kb_tool_node",
         lambda state: "sql_agent" if state.get("route") == "both" else "response",
@@ -80,27 +77,37 @@ def build_agent_graph():
         },
     )
 
-    #  SQL flow: agent → tool node → response
     graph.add_edge("sql_agent", "sql_tool_node")
     graph.add_edge("sql_tool_node", "response")
-
     graph.add_edge("response", END)
 
-    compiled = graph.compile()
-    logger.info("[build_agent_graph] compiled successfully")
+    compiled = graph.compile(checkpointer=checkpointer)
+    logger.info("[build_agent_graph] compiled with PostgresSaver checkpointer")
     return compiled
 
 
-credit_card_agent = build_agent_graph()
+_checkpointer = _build_checkpointer()
+credit_card_agent = build_agent_graph(_checkpointer)
 
 
-def run_credit_card_agent(query: str, session_id: str = "") -> dict:
-    initial_state: AgentState = {
+def _thread_config(session_id: str, mode: str = "sync") -> dict:
+    return {
+        "configurable": {"thread_id": session_id},
+        "run_name": "credit_card_agent",
+        "metadata": {"session_id": session_id, "mode": mode},
+    }
+
+
+def _initial_state(query: str, session_id: str) -> AgentState:
+    """
+    Only supply the fields for this turn. The checkpointer merges these
+    with the replayed state (messages list) from prior turns automatically.
+    """
+    return {
         "query": query,
         "session_id": session_id,
-        "conversation_history": None,
         "route": "",
-        "messages": [],
+        "messages": [HumanMessage(content=query)],
         "chunks": [],
         "kb_context": None,
         "sql_executed": None,
@@ -110,17 +117,12 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         "response": None,
     }
 
+
+def run_credit_card_agent(query: str, session_id: str = "") -> dict:
     try:
         final_state = credit_card_agent.invoke(
-            initial_state,
-            config={
-                "run_name": "credit_card_agent",
-                "metadata": {
-                    "session_id": session_id,
-                    "query": query,
-                    "mode": "sync",
-                },
-            },
+            _initial_state(query, session_id),
+            config=_thread_config(session_id, mode="sync"),
         )
 
         response = final_state.get("response")
@@ -133,6 +135,7 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         return response
 
     except Exception as e:
+        logger.error("[run_credit_card_agent] error: %s", e)
         return {
             "query": query,
             "answer": f"Sorry, I encountered an error: {e}",
@@ -144,19 +147,19 @@ def run_credit_card_agent(query: str, session_id: str = "") -> dict:
         }
 
 
-# Streaming support
+# _history_text_from_messages removed — imported from nodes.py
+
+
 def _build_stream_prompt(final_state: AgentState):
     """
-    Reconstruct the exact prompt inputs used by response_node, but return
-    the (prompt_template, input_dict) so the caller can call .stream() on it.
-
-    Returns (chain, input_dict, metadata_dict) where metadata carries
-    route_taken, page_no, document_name, sql_query_executed, image_paths.
+    Reconstruct the exact prompt used by response_node and return
+    (chain, input_dict, metadata_dict) for streaming.
+    History is derived from the replayed messages in state.
     """
     llm = _get_llm()
     route = final_state.get("route", "knowledge_base")
-    history_text = _format_history(final_state.get("conversation_history") or [])
     messages = final_state.get("messages") or []
+    history_text = _history_text_from_messages(messages)
 
     metadata = {
         "route_taken": route,
@@ -174,13 +177,15 @@ def _build_stream_prompt(final_state: AgentState):
                 "\n\n".join(tm.content for tm in tool_messages)
                 or "No relevant documents found."
             )
-        chain = KB_GENERATION_PROMPT_TEMPLATE | llm
-        inputs = {
-            "query": final_state["query"],
-            "context": kb_context,
-            "history": history_text,
-        }
-        return chain, inputs, metadata
+        return (
+            KB_GENERATION_PROMPT_TEMPLATE | llm,
+            {
+                "query": final_state["query"],
+                "context": kb_context,
+                "history": history_text,
+            },
+            metadata,
+        )
 
     if route == "sql_query":
         sql_executed = final_state.get("sql_executed") or ""
@@ -189,20 +194,21 @@ def _build_stream_prompt(final_state: AgentState):
             sql_executed, sql_results = _parse_sql_tool_messages(messages)
         metadata["sql_query_executed"] = sql_executed or None
         metadata["document_name"] = "credit_card_account_data"
-        chain = SQL_ANSWER_PROMPT_TEMPLATE | llm
-        inputs = {
-            "query": final_state["query"],
-            "sql_executed": sql_executed,
-            "sql_results": json.dumps(sql_results, indent=2, default=str),
-            "history": history_text,
-        }
-        return chain, inputs, metadata
+        return (
+            SQL_ANSWER_PROMPT_TEMPLATE | llm,
+            {
+                "query": final_state["query"],
+                "sql_executed": sql_executed,
+                "sql_results": json.dumps(sql_results, indent=2, default=str),
+                "history": history_text,
+            },
+            metadata,
+        )
 
     if route == "both":
-        from langchain_core.messages import AIMessage
-
         kb_tool_names = {"hybrid_search_tool", "vector_search_tool"}
         sql_tool_names = {"nl2sql_execute", "nl2sql_execute_multi"}
+
         call_id_to_tool: dict[str, str] = {}
         for m in messages:
             if isinstance(m, AIMessage):
@@ -230,64 +236,39 @@ def _build_stream_prompt(final_state: AgentState):
             sql_results = final_state.get("sql_results") or []
 
         metadata["sql_query_executed"] = sql_executed or None
-        chain = COMBINED_ANSWER_PROMPT_TEMPLATE | llm
-        inputs = {
-            "query": final_state["query"],
-            "kb_context": kb_context,
-            "sql_results": (
-                json.dumps(sql_results, indent=2, default=str)
-                if sql_results
-                else "No account data found."
-            ),
-            "history": history_text,
-        }
-        return chain, inputs, metadata
+        return (
+            COMBINED_ANSWER_PROMPT_TEMPLATE | llm,
+            {
+                "query": final_state["query"],
+                "kb_context": kb_context,
+                "sql_results": (
+                    json.dumps(sql_results, indent=2, default=str)
+                    if sql_results
+                    else "No account data found."
+                ),
+                "history": history_text,
+            },
+            metadata,
+        )
 
-    # general — falls through to GENERAL_PROMPT_TEMPLATE
-    chain = GENERAL_PROMPT_TEMPLATE | llm
-    inputs = {"query": final_state["query"], "history": history_text}
-    return chain, inputs, metadata
+    # general
+    return (
+        GENERAL_PROMPT_TEMPLATE | llm,
+        {"query": final_state["query"], "history": history_text},
+        metadata,
+    )
 
 
 def run_credit_card_agent_stream(
     query: str, session_id: str = ""
 ) -> Generator[str, None, None]:
-    """
-    Run the full LangGraph pipeline (routing + retrieval/SQL), then stream
-    the final LLM answer token-by-token as plain text chunks.
-    """
-    initial_state: AgentState = {
-        "query": query,
-        "session_id": session_id,
-        "conversation_history": None,
-        "route": "",
-        "messages": [],
-        "chunks": [],
-        "kb_context": None,
-        "sql_executed": None,
-        "sql_results": None,
-        "sql_queries_run": [],
-        "sql_facts": None,
-        "response": None,
-    }
-
     try:
-        # Step 1 — run the full graph (retrieval/SQL happen here)
         final_state = credit_card_agent.invoke(
-            initial_state,
-            config={
-                "run_name": "credit_card_agent_stream",
-                "metadata": {
-                    "session_id": session_id,
-                    "query": query,
-                    "mode": "stream",
-                },
-            },
+            _initial_state(query, session_id),
+            config=_thread_config(session_id, mode="stream"),
         )
-        route = final_state.get("route", "unknown")
-        logger.info("[stream] graph done, route=%s", route)
+        logger.info("[stream] graph done, route=%s", final_state.get("route"))
 
-        # Step 2 — rebuild the prompt and stream the answer.
         chain, inputs, metadata = _build_stream_prompt(final_state)
 
         for chunk in chain.stream(inputs):
@@ -297,13 +278,13 @@ def run_credit_card_agent_stream(
 
         yield "data: [DONE]\n\n"
 
-        # Step 3 — emit metadata so the client can show sources etc
         response_obj = final_state.get("response")
         if response_obj is not None:
-            if hasattr(response_obj, "model_dump"):
-                response_dict = response_obj.model_dump()
-            else:
-                response_dict = response_obj
+            response_dict = (
+                response_obj.model_dump()
+                if hasattr(response_obj, "model_dump")
+                else response_obj
+            )
             for key in (
                 "route_taken",
                 "page_no",

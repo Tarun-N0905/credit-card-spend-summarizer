@@ -2,7 +2,7 @@
 name = "CREDIT_CARD_SPEND_SUMMARIZER"
 version = "0.1.0"
 description = "Credit Card Spend Summarizer with LangGraph agent, FastAPI, and RAG"
-requires-python = ">=3.11"
+requires-python = ">=3.10, <4.0"
 dependencies = [
     "fastapi[standard]>=0.111.0",
     "uvicorn[standard]>=0.29.0",
@@ -27,6 +27,8 @@ dependencies = [
     "mistune>=3.2.1",
     "markdown>=3.10.2",
     "guardrails-ai>=0.10.2",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "msgpack>=1.2.0",
 ]
 
 [build-system]

@@ -3,6 +3,7 @@ import logging
 import uuid
 from contextlib import contextmanager
 from typing import Generator
+import msgpack
 import psycopg
 from psycopg.rows import dict_row
 from src.api.v1.core.embeddings import embed_documents
@@ -12,37 +13,12 @@ from langchain_community.utilities import SQLDatabase
 logger = logging.getLogger(__name__)
 
 
-# Connection management
 def _get_connection() -> psycopg.Connection:
-    """Open and return a new psycopg connection using the configured DSN.
-
-    A new connection is created per call. For a production service a
-    connection pool (psycopg_pool.ConnectionPool) would be used instead,
-    but for a capstone project a per-request connection is straightforward
-    and avoids pool lifecycle complexity.
-
-    Returns:
-        An open psycopg.Connection with autocommit=False (default).
-
-    Raises:
-        psycopg.OperationalError : If the database is unreachable.
-    """
     return psycopg.connect(settings.pg_connection_string, row_factory=dict_row)
 
 
 @contextmanager
 def get_db() -> Generator[psycopg.Connection, None, None]:
-    """Context manager that yields a DB connection and handles cleanup.
-
-    Commits on clean exit, rolls back on any exception, and always closes
-    the connection. Use this for all DB operations:
-
-        with get_db() as conn:
-            conn.execute(...)
-
-    Yields:
-        psycopg.Connection
-    """
     conn = _get_connection()
     try:
         yield conn
@@ -54,232 +30,432 @@ def get_db() -> Generator[psycopg.Connection, None, None]:
         conn.close()
 
 
-# Document registration
+# ── Document registration ────────────────────────────────────────────────────
+
+
 def upsert_document(document_name: str, document_type: str) -> str:
-    """Insert a new document record or return the existing one's UUID.
-
-    Re-ingesting the same filename reuses the same doc_id so chunk rows
-    remain consistently associated and can be cleaned up by doc_id if
-    needed (ON DELETE CASCADE on the document_chunks FK).
-
-    Args:
-        document_name : Filename of the PDF (e.g. "rewards_guide.pdf").
-        document_type : Full path or type label for the document.
-
-    Returns:
-        UUID string of the document record.
-    """
     with get_db() as conn:
-        # Check if document already exists by name
         row = conn.execute(
             "SELECT id FROM documents WHERE document_name = %s",
             (document_name,),
         ).fetchone()
-
         if row:
             logger.info(
                 "Document already registered: %s → %s", document_name, row["id"]
             )
             return str(row["id"])
-
         doc_id = str(uuid.uuid4())
         conn.execute(
-            """
-            INSERT INTO documents (id, document_name, document_type)
-            VALUES (%s, %s, %s)
-            """,
+            "INSERT INTO documents (id, document_name, document_type) VALUES (%s, %s, %s)",
             (doc_id, document_name, document_type),
         )
         logger.info("Registered new document: %s → %s", document_name, doc_id)
         return doc_id
 
 
-# Chunk storage
+# ── Chunk storage ────────────────────────────────────────────────────────────
+
+
 def store_chunks(chunks: list[dict], doc_id: str) -> int:
-    """Embed and store a list of deduplicated chunks into document_chunks.
-
-    Steps:
-      1. Extract content strings from all chunks
-      2. Embed in batches via embed_documents()
-      3. INSERT each chunk row with its vector, metadata, and hash
-
-    The chunk dicts are expected to have "chunk_hash" already injected by
-    deduplication.deduplicate_chunks() so no re-hashing is needed here.
-
-    Args:
-        chunks : List of chunk dicts with keys:
-                   content, content_type, chunk_hash, metadata
-                 metadata is expected to have: page_number, section,
-                 element_type, position (JSONB dict or None)
-        doc_id : UUID string of the parent document record.
-
-    Returns:
-        Number of chunks successfully stored.
-
-    Raises:
-        Exception : Propagates DB or embedding errors to the caller.
-    """
     if not chunks:
-        logger.info("store_chunks: no chunks to store")
         return 0
-
-    #  Step 1: Batch embed all chunk texts
     texts = [c["content"] for c in chunks]
     embeddings = embed_documents(texts)
-
-    #  Step 2: Insert each chunk row
     stored = 0
     with get_db() as conn:
         for chunk, embedding in zip(chunks, embeddings):
             meta = chunk.get("metadata", {})
-            chunk_id = str(uuid.uuid4())
-
             conn.execute(
                 """
                 INSERT INTO document_chunks (
-                    id,
-                    document_id,
-                    chunk_hash,
-                    chunk_text,
-                    embedding,
-                    content_type,
-                    page_number,
-                    section_name,
-                    metadata,
-                    position
+                    id, document_id, chunk_hash, chunk_text, embedding,
+                    content_type, page_number, section_name, metadata, position
                 ) VALUES (
-                    %s, %s, %s, %s,
-                    %s::vector,
+                    %s, %s, %s, %s, %s::vector,
                     %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (chunk_hash) DO NOTHING
                 """,
                 (
-                    chunk_id,
+                    str(uuid.uuid4()),
                     doc_id,
                     chunk["chunk_hash"],
                     chunk["content"],
-                    json.dumps(embedding),  # cast to vector in SQL
+                    json.dumps(embedding),
                     chunk.get("content_type"),
                     meta.get("page_number"),
                     meta.get("section"),
-                    json.dumps(meta),  # full metadata as JSONB
+                    json.dumps(meta),
                     json.dumps(meta.get("position")) if meta.get("position") else None,
                 ),
             )
             stored += 1
-
     logger.info("store_chunks: stored %d chunks for doc_id=%s", stored, doc_id)
     return stored
 
 
-# Deduplication support
+# ── Deduplication support ────────────────────────────────────────────────────
+
+
 def get_existing_hashes() -> set[str]:
-    """Fetch all chunk_hash values currently stored in document_chunks.
-
-    Called by deduplication.deduplicate_chunks() before ingestion so that
-    chunks already present from a previous ingestion run are not re-inserted.
-
-    Returns:
-        Set of 64-character SHA256 hex strings.
-
-    Raises:
-        Exception : Propagates DB errors — let ingestion handle them.
-    """
     with get_db() as conn:
         rows = conn.execute("SELECT chunk_hash FROM document_chunks").fetchall()
-    hashes = {row["chunk_hash"] for row in rows}
-    logger.debug("get_existing_hashes: %d hashes loaded from DB", len(hashes))
-    return hashes
+    return {row["chunk_hash"] for row in rows}
 
 
-# Conversation storage
-def get_or_create_conversation(session_id: str) -> str:
-    """Return the conversation UUID for a session, creating it if needed.
+# ── Checkpoint-backed conversation helpers ───────────────────────────────────
 
-    Each browser session (identified by session_id UUID) maps to exactly
-    one conversation record. This is looked up on every chat request so
-    messages are appended to the correct conversation.
 
-    Args:
-        session_id : UUID string from the Streamlit session state.
+def _decode_ext_message(ext: msgpack.ExtType) -> dict | None:
+    try:
+        inner = msgpack.unpackb(ext.data, raw=False)
+        if isinstance(inner, (list, tuple)) and len(inner) >= 3:
+            fields = inner[2] if isinstance(inner[2], dict) else {}
+        elif isinstance(inner, dict):
+            fields = inner
+        else:
+            return None
 
-    Returns:
-        UUID string of the conversation record.
+        msg_type = (fields.get("type") or "").lower()
+        raw_content = fields.get("content") or ""
+
+        if isinstance(raw_content, list):
+            content = " ".join(
+                part.get("text", "")
+                for part in raw_content
+                if isinstance(part, dict) and part.get("text")
+            ).strip()
+        else:
+            content = str(raw_content).strip()
+
+        if msg_type == "human":
+            return {"role": "user", "content": content}
+        elif msg_type == "ai" and content:
+            return {"role": "assistant", "content": content}
+        return None
+    except Exception as e:
+        logger.debug("[ext] failed to decode ExtType: %s", e)
+        return None
+
+
+def _decode_dict_message(item: dict) -> dict | None:
+    try:
+        msg_type = (item.get("type") or "").lower()
+        raw_content = item.get("content") or ""
+        if isinstance(raw_content, list):
+            content = " ".join(
+                part.get("text", "")
+                for part in raw_content
+                if isinstance(part, dict) and part.get("text")
+            ).strip()
+        else:
+            content = str(raw_content).strip()
+        if msg_type == "human":
+            return {"role": "user", "content": content}
+        elif msg_type == "ai" and content:
+            return {"role": "assistant", "content": content}
+        return None
+    except Exception:
+        return None
+
+
+def _extract_messages_from_blob(blob_value) -> list[dict]:
     """
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM conversations WHERE session_id = %s",
-            (session_id,),
+    Decode the messages-channel checkpoint blob into a list of
+    {"role": "user"|"assistant", "content": "..."} dicts.
+    Includes both human AND AI messages (with non-empty content).
+    """
+    try:
+        data = msgpack.unpackb(blob_value, raw=False)
+    except Exception:
+        try:
+            data = (
+                json.loads(blob_value)
+                if isinstance(blob_value, (str, bytes))
+                else blob_value
+            )
+        except Exception:
+            return []
+
+    if not isinstance(data, list):
+        return []
+
+    seen = set()
+    result = []
+    for item in data:
+        if isinstance(item, msgpack.ExtType):
+            msg = _decode_ext_message(item)
+        elif isinstance(item, dict):
+            msg = _decode_dict_message(item)
+        else:
+            continue
+        if not msg:
+            continue
+        key = (msg["role"], msg["content"])
+        if key not in seen:
+            seen.add(key)
+            result.append(msg)
+    return result
+
+
+def _get_latest_messages_blob(conn, thread_id: str) -> tuple[bytes | None, str | None]:
+    cp_row = conn.execute(
+        """
+        SELECT
+            checkpoint->>'ts' AS ts,
+            checkpoint->'channel_versions'->>'messages' AS messages_version
+        FROM checkpoints
+        WHERE thread_id = %s
+        ORDER BY checkpoint->>'ts' DESC
+        LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()
+
+    if not cp_row:
+        return None, None
+
+    ts = cp_row["ts"]
+    messages_version = cp_row["messages_version"]
+
+    if messages_version:
+        blob_row = conn.execute(
+            """
+            SELECT blob
+            FROM checkpoint_blobs
+            WHERE thread_id = %s
+              AND channel = 'messages'
+              AND version = %s
+            """,
+            (thread_id, messages_version),
+        ).fetchone()
+    else:
+        blob_row = conn.execute(
+            """
+            SELECT blob
+            FROM checkpoint_blobs
+            WHERE thread_id = %s
+              AND channel = 'messages'
+            ORDER BY version DESC
+            LIMIT 1
+            """,
+            (thread_id,),
         ).fetchone()
 
-        if row:
-            return str(row["id"])
-
-        conversation_id = str(uuid.uuid4())
-        conn.execute(
-            "INSERT INTO conversations (id, session_id) VALUES (%s, %s)",
-            (conversation_id, session_id),
-        )
-        logger.info(
-            "Created conversation %s for session %s", conversation_id, session_id
-        )
-        return conversation_id
+    blob = blob_row["blob"] if blob_row else None
+    return blob, ts
 
 
-def save_message(conversation_id: str, role: str, content: str) -> None:
-    """Persist a single chat message to the messages table.
+def _decode_agent_response_ext(ext: msgpack.ExtType) -> str | None:
+    """
+    LangGraph serialises AgentResponse as ExtType(code=5) whose data unpacks to:
+      [module_str, 'AgentResponse', {field: value, ...}, 'model_validate_json']
+    The answer lives at inner[2]['answer'].
+    """
+    try:
+        inner = msgpack.unpackb(ext.data, raw=False)
+        if not (isinstance(inner, (list, tuple)) and len(inner) >= 3):
+            return None
+        if inner[1] != "AgentResponse":
+            return None
+        fields = inner[2]
+        if not isinstance(fields, dict):
+            return None
+        answer = fields.get("answer") or ""
+        return str(answer).strip() or None
+    except Exception as e:
+        logger.debug("[_decode_agent_response_ext] failed: %s", e)
+        return None
 
-    Called after every user input and agent response so the full
-    conversation history is stored in PostgreSQL.
 
-    Args:
-        conversation_id : UUID of the parent conversation record.
-        role            : "user" or "assistant".
-        content         : The message text.
+def _decode_response_blob(blob_value) -> str | None:
+    """
+    Decode a response-channel blob.
+
+    LangGraph stores AgentResponse as ExtType(code=5):
+      inner = [module, 'AgentResponse', {'answer': '...', ...}, 'model_validate_json']
+
+    Falls back to plain dict / str for forward-compatibility.
+    """
+    try:
+        data = msgpack.unpackb(blob_value, raw=False)
+    except Exception:
+        try:
+            data = (
+                json.loads(blob_value)
+                if isinstance(blob_value, (str, bytes))
+                else blob_value
+            )
+        except Exception:
+            return None
+
+    if isinstance(data, str):
+        return data.strip() or None
+
+    if isinstance(data, dict):
+        answer = data.get("answer") or data.get("content") or ""
+        return str(answer).strip() or None
+
+    # ExtType — the actual production format (AgentResponse)
+    if isinstance(data, msgpack.ExtType):
+        return _decode_agent_response_ext(data)
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, msgpack.ExtType):
+                answer = _decode_agent_response_ext(item)
+                if answer:
+                    return answer
+            elif isinstance(item, dict):
+                answer = item.get("answer") or item.get("content") or ""
+                if answer:
+                    return str(answer).strip()
+
+    return None
+
+
+def _get_response_pairs(conn, thread_id: str) -> list[tuple[str, str]]:
+    """
+    Return (query, answer) pairs from response-channel blobs, ordered by version.
+    The query field lets us match each answer back to the right human message
+    without relying on fragile positional pairing.
+    """
+    rows = conn.execute(
+        """
+        SELECT blob
+        FROM checkpoint_blobs
+        WHERE thread_id = %s
+          AND channel = 'response'
+        ORDER BY version ASC
+        """,
+        (thread_id,),
+    ).fetchall()
+    pairs = []
+    for row in rows:
+        try:
+            data = msgpack.unpackb(row["blob"], raw=False)
+        except Exception:
+            continue
+        if not isinstance(data, msgpack.ExtType):
+            continue
+        try:
+            inner = msgpack.unpackb(data.data, raw=False)
+            if not (isinstance(inner, (list, tuple)) and len(inner) >= 3):
+                continue
+            if inner[1] != "AgentResponse":
+                continue
+            fields = inner[2]
+            if not isinstance(fields, dict):
+                continue
+            query = str(fields.get("query") or "").strip()
+            answer = str(fields.get("answer") or "").strip()
+            if query and answer:
+                pairs.append((query, answer))
+        except Exception:
+            continue
+    return pairs
+
+
+def get_conversation_messages(session_id: str) -> list[dict]:
+    """
+    Retrieve the full conversation (user + assistant messages) for a session.
+
+    Primary strategy: extract both human and AI messages from the checkpoint's
+    messages channel blob — this works when response_node appends an AIMessage
+    (post-fix sessions).
+
+    Fallback: match response-channel blobs to human messages by query text.
+    This handles old checkpoints where response_node never wrote AIMessages.
+    Matching by query instead of position avoids off-by-one errors caused by
+    duplicate human messages being deduped while their responses are not.
     """
     with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO messages (id, conversation_id, role, content)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (str(uuid.uuid4()), conversation_id, role, content),
-        )
+        blob, ts = _get_latest_messages_blob(conn, session_id)
+        if not blob:
+            return []
+
+        all_messages = _extract_messages_from_blob(blob)
+        has_ai = any(m["role"] == "assistant" for m in all_messages)
+
+        if has_ai:
+            for m in all_messages:
+                m["created_at"] = ts or ""
+            return all_messages
+
+        # Fallback: use response channel, match by query text
+        response_pairs = _get_response_pairs(conn, session_id)
+
+    # Build query→answer map (last answer wins for repeated queries)
+    query_to_answer: dict[str, str] = {}
+    for query, answer in response_pairs:
+        query_to_answer[query] = answer
+
+    human_messages = [m for m in all_messages if m["role"] == "user"]
+
+    result = []
+    for human in human_messages:
+        human["created_at"] = ts or ""
+        result.append(human)
+        answer = query_to_answer.get(human["content"])
+        if answer:
+            result.append(
+                {"role": "assistant", "content": answer, "created_at": ts or ""}
+            )
+
+    return result
 
 
-def get_conversation_messages(conversation_id: str) -> list[dict]:
-    """Retrieve all messages for a conversation ordered by creation time.
-
-    Used by the LangGraph agent to reconstruct conversation history on
-    each request so the LLM has full context of the prior turns.
-
-    Args:
-        conversation_id : UUID of the conversation.
-
-    Returns:
-        List of dicts with keys: role, content, created_at.
-    """
+def list_conversations() -> list[dict]:
     with get_db() as conn:
-        rows = conn.execute(
+        thread_rows = conn.execute(
             """
-            SELECT role, content, created_at
-            FROM messages
-            WHERE conversation_id = %s
-            ORDER BY created_at ASC
+            SELECT
+                thread_id,
+                MIN(checkpoint->>'ts') AS created_at
+            FROM checkpoints
+            GROUP BY thread_id
+            ORDER BY MIN(checkpoint->>'ts') DESC
             """,
-            (conversation_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+
+        if not thread_rows:
+            return []
+
+        results = []
+        for row in thread_rows:
+            blob, _ = _get_latest_messages_blob(conn, row["thread_id"])
+            preview = ""
+            if blob:
+                msgs = _extract_messages_from_blob(blob)
+                user_msgs = [m for m in msgs if m["role"] == "user"]
+                if user_msgs:
+                    preview = user_msgs[0]["content"][:100]
+
+            results.append(
+                {
+                    "session_id": row["thread_id"],
+                    "preview": preview,
+                    "created_at": row["created_at"] or "",
+                }
+            )
+
+        return results
 
 
-# Health check
+def delete_conversation(session_id: str) -> None:
+    with get_db() as conn:
+        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+            conn.execute(
+                f"DELETE FROM {table} WHERE thread_id = %s",  # noqa: S608
+                (session_id,),
+            )
+    logger.info("Deleted checkpoints for session_id=%s", session_id)
+
+
+# ── Health check ─────────────────────────────────────────────────────────────
+
+
 def check_db_connection() -> bool:
-    """Verify the database is reachable by running a lightweight query.
-
-    Called by the FastAPI /health endpoint and the Streamlit system status
-    page. Returns True if the DB responds, False otherwise — never raises.
-    """
     try:
         with get_db() as conn:
             conn.execute("SELECT 1")
@@ -289,55 +465,7 @@ def check_db_connection() -> bool:
         return False
 
 
-# Conversation listing and deletion (used by API endpoints)
-def list_conversations() -> list[dict]:
-    """Return all conversations with a first-message preview and timestamp.
-
-    Called by GET /api/v1/conversations. The preview is the content of the
-    first user message in that conversation, truncated to 100 characters.
-    Conversations with no messages are still returned with an empty preview.
-
-    Returns:
-        List of dicts with keys: session_id, preview, created_at.
-    """
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                c.session_id,
-                COALESCE(
-                    LEFT(
-                        (SELECT content FROM messages
-                         WHERE conversation_id = c.id
-                         ORDER BY created_at ASC
-                         LIMIT 1),
-                        100
-                    ),
-                    ''
-                ) AS preview,
-                c.created_at
-            FROM conversations c
-            ORDER BY c.created_at DESC
-            """,
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def delete_conversation(session_id: str) -> None:
-    """Delete a conversation and all its messages by session_id.
-
-    The messages table has ON DELETE CASCADE on the conversation_id FK,
-    so deleting the conversation row removes all messages automatically.
-
-    Args:
-        session_id : The session UUID string from the Streamlit client.
-    """
-    with get_db() as conn:
-        conn.execute(
-            "DELETE FROM conversations WHERE session_id = %s",
-            (session_id,),
-        )
-    logger.info("Deleted conversation for session_id=%s", session_id)
+# ── SQL agent helper ─────────────────────────────────────────────────────────
 
 
 def get_sql_database() -> SQLDatabase:

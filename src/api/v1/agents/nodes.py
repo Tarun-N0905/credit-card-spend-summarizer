@@ -17,11 +17,6 @@ from src.api.v1.agents.prompts import (
     SQL_ANSWER_PROMPT_TEMPLATE,
 )
 from src.api.v1.agents.schemas import AgentResponse
-from src.api.v1.core.db import (
-    get_or_create_conversation,
-    save_message,
-    get_conversation_messages,
-)
 from src.api.v1.tools.kb_tools import KB_TOOLS, hybrid_search_tool
 from src.api.v1.tools.sql_tools import SQL_TOOLS, _run_nl2sql
 
@@ -33,7 +28,6 @@ KB_CONFIDENCE_THRESHOLD = 0.4
 class AgentState(TypedDict):
     query: str
     session_id: str
-    conversation_history: Optional[list]
     route: Optional[str]
     messages: Annotated[list, operator.add]
     chunks: Optional[list]
@@ -67,16 +61,22 @@ def _get_sql_agent_llm():
     return llm.bind_tools(SQL_TOOLS)
 
 
-def _format_history(history: list) -> str:
-    if not history:
-        return ""
+def _history_text_from_messages(messages: list) -> str:
+    """
+    Build a plain-text history string from the replayed checkpoint messages.
+    Takes the last 6 Human/AI messages, skips ToolMessages.
+    """
+    human_ai = [
+        m for m in (messages or []) if isinstance(m, (HumanMessage, AIMessage))
+    ][-6:]
     return "\n".join(
-        f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}" for m in history
+        f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}"
+        for m in human_ai
     )
 
 
-def _enrich_query(query: str, history: list) -> str:
-    history_text = _format_history(history[-6:])
+def _enrich_query(query: str, messages: list) -> str:
+    history_text = _history_text_from_messages(messages)
     if not history_text:
         return query
     return f"[Conversation so far]\n{history_text}\n\n[New question]\n{query}"
@@ -137,7 +137,6 @@ def _parse_sql_tool_messages(messages: list) -> tuple[str, list]:
 
 
 def _chunks_pass_threshold(chunks: list, threshold: float) -> bool:
-    """Return True if at least one chunk clears the confidence threshold."""
     for chunk in chunks or []:
         score = getattr(chunk, "score", None) or (
             chunk.get("score") if isinstance(chunk, dict) else None
@@ -147,26 +146,20 @@ def _chunks_pass_threshold(chunks: list, threshold: float) -> bool:
     return False
 
 
-def history_loader_node(state: AgentState) -> AgentState:
-    session_id = state.get("session_id", "")
-    if not session_id:
-        return {**state, "conversation_history": []}
-    try:
-        conv_id = get_or_create_conversation(session_id)
-        messages = get_conversation_messages(conv_id)
-        history = messages[-6:] if messages else []
-        return {**state, "conversation_history": history}
-    except Exception as e:
-        logger.error("[history_loader_node] failed: %s", e)
-        return {**state, "conversation_history": []}
+# ── Node functions ───────────────────────────────────────────────────────────
+# IMPORTANT: Each node must return ONLY the fields it is updating.
+# Returning {**state, ...} would re-add the full messages list through the
+# operator.add reducer, duplicating every message on every node execution.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-def router_node(state: AgentState) -> AgentState:
+def router_node(state: AgentState) -> dict:
     """Classify query → knowledge_base | sql_query | both | general."""
     try:
-        history = state.get("conversation_history") or []
-        enriched = _enrich_query(state["query"], history)
-        router_chain = ROUTER_PROMPT_TEMPLATE | _get_llm().with_structured_output(RouteDecision)
+        enriched = _enrich_query(state["query"], state.get("messages") or [])
+        router_chain = ROUTER_PROMPT_TEMPLATE | _get_llm().with_structured_output(
+            RouteDecision
+        )
         decision: RouteDecision = router_chain.invoke(
             {"query": enriched},
             config={
@@ -180,13 +173,14 @@ def router_node(state: AgentState) -> AgentState:
         )
         route = decision.route
         logger.info("[router_node] route='%s'", route)
-        return {**state, "route": route}
+        # Only return the field we're changing — NOT {**state, ...}
+        return {"route": route}
     except Exception as e:
         logger.error("[router_node] failed: %s", e)
-        return {**state, "route": "general"}
+        return {"route": "general"}
 
 
-def kb_agent_node(state: AgentState) -> AgentState:
+def kb_agent_node(state: AgentState) -> dict:
     """
     Fire the tool-bound LLM so it emits an AIMessage with tool_calls.
     Falls back to hybrid_search_tool (via .invoke) so a proper ToolMessage
@@ -208,56 +202,30 @@ def kb_agent_node(state: AgentState) -> AgentState:
         )
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
+
         if not tool_calls:
-            logger.warning("[kb_agent_node] no tool call; falling back to hybrid_search_tool")
-            tool_result = hybrid_search_tool.invoke(
-                {"query": state["query"], "top_k": 5}
+            logger.warning(
+                "[kb_agent_node] no tool_calls — falling back to hybrid_search_tool directly"
             )
-            kb_context = (
-                tool_result if isinstance(tool_result, str) else json.dumps(tool_result)
-            )
-            tool_msg = ToolMessage(
-                content=kb_context,
-                tool_call_id="fallback-kb",
+            raw = hybrid_search_tool.invoke({"query": state["query"]})
+            fallback_tool_msg = ToolMessage(
+                content=raw if isinstance(raw, str) else json.dumps(raw),
+                tool_call_id="fallback",
                 name="hybrid_search_tool",
             )
-            return {
-                **state,
-                "messages": [human_msg, ai_msg, tool_msg],
-                "kb_context": kb_context,
-            }
+            return {"messages": [ai_msg, fallback_tool_msg]}
 
-        tool_name = tool_calls[0].get("name", "")
-        logger.info("[kb_agent_node] LLM selected tool: '%s'", tool_name)
-        return {**state, "messages": [human_msg, ai_msg]}
+        return {"messages": [ai_msg]}
 
     except Exception as e:
         logger.error("[kb_agent_node] failed: %s", e)
-        return {
-            **state,
-            "messages": [],
-            "chunks": [],
-            "kb_context": "No relevant documents found.",
-        }
+        return {"messages": []}
 
 
-def sql_agent_node(state: AgentState) -> AgentState:
-    """
-    Fire the tool-bound SQL agent LLM so it emits an AIMessage with tool_calls.
-    Falls back to direct _run_nl2sql if the LLM returns no tool call.
-    """
+def sql_agent_node(state: AgentState) -> dict:
     try:
         sql_llm = _get_sql_agent_llm()
-        history = state.get("conversation_history") or []
-        history_text = _format_history(history)
-        enriched = _enrich_query(state["query"], history)
-
-        human_msg = HumanMessage(
-            content=SQL_AGENT_PROMPT_TEMPLATE.format_messages(
-                query=enriched,
-                history=history_text,
-            )[-1].content
-        )
+        human_msg = HumanMessage(content=state["query"])
         ai_msg: AIMessage = sql_llm.invoke(
             [human_msg],
             config={
@@ -266,45 +234,23 @@ def sql_agent_node(state: AgentState) -> AgentState:
                     "node": "sql_agent_node",
                     "session_id": state.get("session_id", ""),
                     "query": state["query"],
-                    "route": state.get("route", ""),
                 },
             },
         )
-
-        tool_calls = getattr(ai_msg, "tool_calls", None) or []
-        if not tool_calls:
-            logger.warning("[sql_agent_node] no tool call; falling back to direct NL2SQL")
-            sql, rows = _run_nl2sql(enriched)
-            return {
-                **state,
-                "messages": [human_msg, ai_msg],
-                "sql_executed": sql,
-                "sql_results": rows,
-                "sql_queries_run": [sql] if sql else [],
-            }
-
-        tool_name = tool_calls[0].get("name", "")
-        logger.info("[sql_agent_node] LLM selected tool: '%s'", tool_name)
-        return {**state, "messages": [human_msg, ai_msg]}
-
+        return {"messages": [ai_msg]}
     except Exception as e:
         logger.error("[sql_agent_node] failed: %s", e)
-        return {
-            **state,
-            "messages": [],
-            "sql_executed": "",
-            "sql_results": [],
-            "sql_queries_run": [],
-        }
+        return {"messages": []}
 
 
-def response_node(state: AgentState) -> AgentState:
+def response_node(state: AgentState) -> dict:
     try:
         llm = _get_llm()
-        route = state.get("route", "knowledge_base")
-        history_text = _format_history(state.get("conversation_history") or [])
+        route = state.get("route", "general")
+        messages = state.get("messages") or []
+        history_text = _history_text_from_messages(messages)
 
-        # ── general (inlined — no separate node) ────────────────────────────
+        # ── general ──────────────────────────────────────────────────────────
         if route == "general":
             result = (GENERAL_PROMPT_TEMPLATE | llm).invoke(
                 {"query": state["query"], "history": history_text},
@@ -318,9 +264,10 @@ def response_node(state: AgentState) -> AgentState:
                     },
                 },
             )
+            answer = result.content.strip()
             response = AgentResponse(
                 query=state["query"],
-                answer=result.content.strip(),
+                answer=answer,
                 data_sources=[],
                 page_no="N/A",
                 document_name="N/A",
@@ -328,38 +275,18 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken="general",
                 image_paths=None,
             )
-            logger.info("[response_node/general] answer generated")
-            return {**state, "response": response}
+            # Return response AND an AIMessage so the checkpoint stores the answer
+            return {
+                "response": response,
+                "messages": [AIMessage(content=answer)],
+            }
 
         # ── knowledge_base ───────────────────────────────────────────────────
         if route == "knowledge_base":
             chunks = state.get("chunks") or []
-
-            # Confidence gate — short-circuit if no chunk clears threshold
-            if chunks and not _chunks_pass_threshold(chunks, KB_CONFIDENCE_THRESHOLD):
-                logger.info(
-                    "[response_node/kb] all chunks below threshold %.2f — short-circuiting",
-                    KB_CONFIDENCE_THRESHOLD,
-                )
-                response = AgentResponse(
-                    query=state["query"],
-                    answer="I don't have enough information in my knowledge base to answer that accurately.",
-                    data_sources=[],
-                    page_no="N/A",
-                    document_name="N/A",
-                    sql_query_executed=None,
-                    route_taken="knowledge_base",
-                    image_paths=None,
-                )
-                return {**state, "response": response}
-
             kb_context = state.get("kb_context")
             if not kb_context:
-                tool_messages = [
-                    m
-                    for m in (state.get("messages") or [])
-                    if isinstance(m, ToolMessage)
-                ]
+                tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
                 kb_context = (
                     "\n\n".join(tm.content for tm in tool_messages)
                     or "No relevant documents found."
@@ -420,16 +347,17 @@ def response_node(state: AgentState) -> AgentState:
                 "[response_node/kb] answer generated — %d image(s)",
                 len(image_paths or []),
             )
-            return {**state, "response": response}
+            return {
+                "response": response,
+                "messages": [AIMessage(content=answer)],
+            }
 
         # ── sql_query ────────────────────────────────────────────────────────
         if route == "sql_query":
             sql_executed = state.get("sql_executed") or ""
             sql_results = state.get("sql_results") or []
             if not sql_executed:
-                sql_executed, sql_results = _parse_sql_tool_messages(
-                    state.get("messages") or []
-                )
+                sql_executed, sql_results = _parse_sql_tool_messages(messages)
 
             result = (SQL_ANSWER_PROMPT_TEMPLATE | llm).invoke(
                 {
@@ -449,9 +377,10 @@ def response_node(state: AgentState) -> AgentState:
                     },
                 },
             )
+            answer = result.content.strip()
             response = AgentResponse(
                 query=state["query"],
-                answer=result.content.strip(),
+                answer=answer,
                 data_sources=[],
                 page_no="N/A",
                 document_name="credit_card_account_data",
@@ -460,12 +389,13 @@ def response_node(state: AgentState) -> AgentState:
                 image_paths=None,
             )
             logger.info("[response_node/sql] answer generated")
-            return {**state, "response": response}
+            return {
+                "response": response,
+                "messages": [AIMessage(content=answer)],
+            }
 
         # ── both ─────────────────────────────────────────────────────────────
         if route == "both":
-            messages = state.get("messages") or []
-
             kb_tool_names = {"hybrid_search_tool", "vector_search_tool"}
             sql_tool_names = {"nl2sql_execute", "nl2sql_execute_multi"}
 
@@ -551,9 +481,10 @@ def response_node(state: AgentState) -> AgentState:
                     },
                 },
             )
+            answer = result.content.strip()
             response = AgentResponse(
                 query=state["query"],
-                answer=result.content.strip(),
+                answer=answer,
                 data_sources=data_sources,
                 page_no=", ".join(page_numbers) if page_numbers else "N/A",
                 document_name=", ".join(doc_names) if doc_names else "N/A",
@@ -564,17 +495,22 @@ def response_node(state: AgentState) -> AgentState:
             logger.info(
                 "[response_node/both] merged answer — %d image(s)", len(image_paths)
             )
-            return {**state, "response": response}
+            return {
+                "response": response,
+                "messages": [AIMessage(content=answer)],
+            }
 
         raise ValueError(f"response_node received unexpected route: {route!r}")
 
     except Exception as e:
         logger.error("[response_node] failed: %s", e)
+        error_answer = (
+            "Sorry, I encountered an error generating a response. Please try again."
+        )
         return {
-            **state,
             "response": AgentResponse(
                 query=state["query"],
-                answer="Sorry, I encountered an error generating a response. Please try again.",
+                answer=error_answer,
                 data_sources=[],
                 page_no="N/A",
                 document_name="N/A",
@@ -582,4 +518,5 @@ def response_node(state: AgentState) -> AgentState:
                 route_taken=state.get("route", "unknown"),
                 image_paths=None,
             ),
+            "messages": [AIMessage(content=error_answer)],
         }

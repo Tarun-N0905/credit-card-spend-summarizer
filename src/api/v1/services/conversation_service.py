@@ -28,37 +28,3 @@ def get_or_create_conversation(session_id: str) -> UUID:
         )
         session.commit()
         return result.fetchone()[0]
-
-
-def load_recent_messages(conversation_id: UUID, limit: int = 6) -> list[dict]:
-    """
-    Return the last `limit` messages (chronological order) for a conversation.
-    Returns list of {role: str, content: str}.
-    """
-    with get_rag_db_session() as session:
-        rows = session.execute(
-            """
-            SELECT role, content
-            FROM messages
-            WHERE conversation_id = :cid
-            ORDER BY created_at DESC
-            LIMIT :lim
-            """,
-            {"cid": str(conversation_id), "lim": limit},
-        ).fetchall()
-
-    # Reverse so oldest is first (chronological)
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
-
-
-def save_message(conversation_id: UUID, role: str, content: str) -> None:
-    """Persist a single message to the messages table."""
-    with get_rag_db_session() as session:
-        session.execute(
-            """
-            INSERT INTO messages (conversation_id, role, content)
-            VALUES (:cid, :role, :content)
-            """,
-            {"cid": str(conversation_id), "role": role, "content": content},
-        )
-        session.commit()
